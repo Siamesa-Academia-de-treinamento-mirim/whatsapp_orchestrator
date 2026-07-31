@@ -1,0 +1,17 @@
+<?php
+declare(strict_types=1);
+namespace Chatwoot_plugin\Services;
+use Chatwoot_plugin\Models\Chat_notifications_model;
+use CodeIgniter\Database\BaseConnection;
+use InvalidArgumentException;
+use RuntimeException;
+class Notification_service
+{
+    private BaseConnection $db;public function __construct(private ?Chat_notifications_model $notifications=null,?BaseConnection $db=null){$this->notifications??=new Chat_notifications_model();$this->db=$db??db_connect('default');}
+    public function create(string $kind,string $title,string $message,?string $resourceType=null,?int $resourceId=null,?int $userId=null,string $level='info',?string $dedupeKey=null):?int{$kind=mb_substr(trim($kind),0,64);$title=mb_substr(trim($title),0,191);$message=mb_substr(trim($message),0,2000);if($kind===''||$title===''||$message==='')throw new InvalidArgumentException('Notificacao invalida.');if(!in_array($level,['info','success','warning','danger','error'],true))$level='info';$dedupe=$dedupeKey?hash('sha256',$dedupeKey):null;if($dedupe&&$this->db->table('chat_notifications')->where('dedupe_key',$dedupe)->countAllResults()>0)return null;return$this->notifications->create_record(['user_id'=>$userId,'kind'=>$kind,'level'=>$level,'title'=>$title,'message'=>$message,'resource_type'=>$resourceType,'resource_id'=>$resourceId,'dedupe_key'=>$dedupe]);}
+    public function list(int $userId,int $limit=30,bool $unreadOnly=false):array{$b=$this->db->table('chat_notifications')->where('deleted',0)->groupStart()->where('user_id',$userId)->orWhere('user_id IS NULL',null,false)->groupEnd();if($unreadOnly)$b->where('read_at IS NULL',null,false);$rows=$b->orderBy('created_at','DESC')->limit(min(100,max(1,$limit)))->get()->getResultArray();return array_map([$this,'map'],$rows);}
+    public function unread_count(int $userId):int{return$this->db->table('chat_notifications')->where('deleted',0)->where('read_at IS NULL',null,false)->groupStart()->where('user_id',$userId)->orWhere('user_id IS NULL',null,false)->groupEnd()->countAllResults();}
+    public function read(int $id,int $userId):array{$row=$this->notifications->get_by_id($id);if(!$row||($row['user_id']!==null&&(int)$row['user_id']!==$userId))throw new RuntimeException('Notificacao nao encontrada.',404);$this->notifications->update_record($id,['read_at'=>gmdate('Y-m-d H:i:s')]);return$this->map($this->notifications->get_by_id($id)?:[]);}
+    public function read_all(int $userId):int{$b=$this->db->table('chat_notifications')->where('deleted',0)->where('read_at IS NULL',null,false)->groupStart()->where('user_id',$userId)->orWhere('user_id IS NULL',null,false)->groupEnd();$count=(clone$b)->countAllResults();$b->update(['read_at'=>gmdate('Y-m-d H:i:s'),'updated_at'=>gmdate('Y-m-d H:i:s')]);return$count;}
+    private function map(array $r):array{$created=(string)($r['created_at']??'');$time=$created!==''?gmdate('c',strtotime($created.' UTC')):null;$icons=['message'=>'message-circle','message_failed'=>'alert-triangle','instance'=>'wifi-off','campaign'=>'send','ai_handoff'=>'user-check','webhook'=>'radio'];return['id'=>(int)($r['id']??0),'kind'=>(string)($r['kind']??'system'),'level'=>(string)($r['level']??'info'),'title'=>(string)($r['title']??''),'message'=>(string)($r['message']??''),'resource_type'=>$r['resource_type']??null,'resource_id'=>isset($r['resource_id'])?(int)$r['resource_id']:null,'read'=>!empty($r['read_at']),'read_at'=>$r['read_at']??null,'created_at'=>$time,'time'=>$time?date('d/m H:i',strtotime($time)):'','icon'=>$icons[$r['kind']??'']??'bell'];}
+}

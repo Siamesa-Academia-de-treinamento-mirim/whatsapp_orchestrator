@@ -1,0 +1,26 @@
+<?php
+
+return [
+    'impulso_hub' => 'Impulso Hub',
+    'conversations' => 'Conversations',
+    'contacts' => 'Contacts',
+    'instances' => 'Instances',
+    'campaigns' => 'Campaigns',
+    'ai_automations' => 'AI and automations',
+    'reports' => 'Reports',
+    'settings' => 'Settings',
+    'chatwoot_permissions_title' => 'Impulso Hub Support',
+    'chatwoot_permission_access' => 'Access Impulso Hub Support',
+    'chatwoot_permission_send' => 'Send messages',
+    'chatwoot_permission_manage_conversations' => 'Manage conversations, notes, tags and assignments',
+    'chatwoot_permission_manage_contacts' => 'Manage contacts and imports',
+    'chatwoot_permission_manage_instances' => 'Manage Evolution instances',
+    'chatwoot_permission_manage_campaigns' => 'Manage campaigns',
+    'chatwoot_permission_manage_ai' => 'Manage AI and automations',
+    'chatwoot_permission_view_reports' => 'View reports',
+    'chatwoot_permission_export_reports' => 'Export reports',
+    'chatwoot_permission_manage_settings' => 'Manage settings and credentials',
+    'chatwoot_permission_view_audit_logs' => 'View audit logs',
+    'chatwoot_authentication_required' => 'Authentication required.',
+    'chatwoot_access_denied' => 'You do not have permission to perform this action.',
+];
