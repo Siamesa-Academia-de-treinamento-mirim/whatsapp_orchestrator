@@ -80,19 +80,9 @@ abstract class Api_controller extends Security_Controller
         $this->requirePermission(Chat_permissions::MANAGE_CAMPAIGNS);
     }
 
-    protected function requireManageAiPermission(): void
+    protected function requireManageBotsPermission(): void
     {
-        $this->requirePermission(Chat_permissions::MANAGE_AI);
-    }
-
-    protected function requireViewReportsPermission(): void
-    {
-        $this->requirePermission(Chat_permissions::VIEW_REPORTS);
-    }
-
-    protected function requireExportReportsPermission(): void
-    {
-        $this->requirePermission(Chat_permissions::EXPORT_REPORTS);
+        $this->requirePermission(Chat_permissions::MANAGE_BOTS);
     }
 
     protected function requireManageSettingsPermission(): void

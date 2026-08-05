@@ -19,8 +19,8 @@ foreach ($webhook_logs as $log) {
 <div class="impulso-page">
     <div class="impulso-section-heading">
         <div>
-            <h2>Instâncias Evolution</h2>
-            <p>Gerencie números, identificadores e o estado das conexões WhatsApp.</p>
+            <h2>Canais WhatsApp</h2>
+            <p>Gerencie Evolution API e WhatsApp Cloud API oficial no mesmo atendimento.</p>
         </div>
         <div class="impulso-section-actions">
             <?php if (!empty($can_manage_instances)) { ?>
@@ -52,7 +52,9 @@ foreach ($webhook_logs as $log) {
                     <span class="impulso-badge <?php echo esc($badge); ?>"><span class="impulso-dot"></span><?php echo esc($label); ?></span>
                 </div>
                 <div class="impulso-instance-meta">
-                    <div class="impulso-meta-box"><span>Instância Evolution</span><strong><?php echo esc($instance['evolution_instance_name'] ?? ''); ?></strong></div>
+                    <?php $providerType = (string) ($instance['provider_type'] ?? 'evolution'); ?>
+                    <div class="impulso-meta-box"><span>Provedor</span><strong><?php echo $providerType === 'meta_cloud' ? 'Meta Cloud API' : 'Evolution API'; ?></strong></div>
+                    <div class="impulso-meta-box"><span>Identificador</span><strong><?php echo esc($providerType === 'meta_cloud' ? ($instance['meta_phone_number_id'] ?? '') : ($instance['evolution_instance_name'] ?? '')); ?></strong></div>
                     <div class="impulso-meta-box"><span>Conversas</span><strong><?php echo (int) ($instance['conversation_count'] ?? 0); ?></strong></div>
                     <div class="impulso-meta-box"><span>Não lidas</span><strong><?php echo (int) ($instance['unread_count'] ?? 0); ?></strong></div>
                     <div class="impulso-meta-box"><span>Status operacional</span><strong><?php echo !empty($instance['active']) ? 'Ativa' : 'Inativa'; ?></strong></div>
@@ -73,7 +75,7 @@ foreach ($webhook_logs as $log) {
         <?php } ?>
         <?php if (!$instances) { ?>
             <div class="impulso-card impulso-card-body" style="grid-column:1/-1;">
-                <div class="impulso-empty"><div class="impulso-empty-icon"><i data-feather="smartphone"></i></div><h4>Nenhuma instância cadastrada</h4><p>Cadastre a primeira conexão Evolution para iniciar o atendimento.</p></div>
+                <div class="impulso-empty"><div class="impulso-empty-icon"><i data-feather="smartphone"></i></div><h4>Nenhuma instância cadastrada</h4><p>Cadastre o primeiro canal WhatsApp para iniciar o atendimento.</p></div>
             </div>
         <?php } ?>
     </div>

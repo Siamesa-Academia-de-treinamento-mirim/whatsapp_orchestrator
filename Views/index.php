@@ -5,8 +5,7 @@ $tabs = [
     'contacts' => ['label' => 'Contatos', 'icon' => 'users'],
     'instances' => ['label' => 'Instâncias', 'icon' => 'smartphone'],
     'campaigns' => ['label' => 'Campanhas', 'icon' => 'send'],
-    'ai' => ['label' => 'IA e Automações', 'icon' => 'cpu'],
-    'reports' => ['label' => 'Relatórios', 'icon' => 'bar-chart-2'],
+    'bots' => ['label' => 'Bots', 'icon' => 'git-branch'],
     'settings' => ['label' => 'Configurações', 'icon' => 'settings']
 ];
 
@@ -18,8 +17,7 @@ if (empty($can_manage_settings)) {
 }
 if (empty($can_manage_contacts)) { unset($tabs['contacts']); }
 if (empty($can_manage_campaigns)) { unset($tabs['campaigns']); }
-if (empty($can_manage_ai)) { unset($tabs['ai']); }
-if (empty($can_view_reports)) { unset($tabs['reports']); }
+if (empty($can_manage_bots)) { unset($tabs['bots']); }
 
 $active_tab = $active_tab ?? 'dashboard';
 if (!isset($tabs[$active_tab])) {
@@ -31,7 +29,7 @@ $total_unread = (int) ($notification_unread_count ?? 0);
 include __DIR__ . '/partials/styles.php';
 ?>
 
-<div id="page-content" class="page-wrapper clearfix">
+<div id="page-content" class="page-wrapper clearfix impulso-page-content<?php echo $active_tab === 'conversations' ? ' impulso-page-content--conversations' : ''; ?>">
     <div id="impulso-hub-app" class="impulso-hub" data-active-tab="<?php echo esc($active_tab); ?>">
         <div class="card impulso-shell-card">
             <?php if (!empty($integration_error)) { ?>

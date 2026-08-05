@@ -10,9 +10,7 @@ use Chatwoot_plugin\Libraries\Migration_runner;
 use Chatwoot_plugin\Services\Chat_service;
 use Chatwoot_plugin\Services\Contact_service;
 use Chatwoot_plugin\Services\Campaign_service;
-use Chatwoot_plugin\Services\Ai_service;
-use Chatwoot_plugin\Services\Automation_service;
-use Chatwoot_plugin\Services\Report_service;
+use Chatwoot_plugin\Services\Bot_service;
 use Chatwoot_plugin\Services\Notification_service;
 use Throwable;
 
@@ -38,7 +36,7 @@ class Chatwoot extends Security_Controller
     public function index()
     {
         $activeTab = (string) $this->request->getGet('chatwoot_tab');
-        $allowedTabs = ['dashboard', 'conversations', 'contacts', 'instances', 'campaigns', 'ai', 'reports', 'settings'];
+        $allowedTabs = ['dashboard', 'conversations', 'contacts', 'instances', 'campaigns', 'bots', 'settings'];
         if (!in_array($activeTab, $allowedTabs, true)) {
             $activeTab = 'dashboard';
         }
@@ -48,15 +46,12 @@ class Chatwoot extends Security_Controller
         $canManageContacts = Chat_permissions::can($this->login_user, Chat_permissions::MANAGE_CONTACTS);
         $canManageInstances = Chat_permissions::can($this->login_user, Chat_permissions::MANAGE_INSTANCES);
         $canManageCampaigns = Chat_permissions::can($this->login_user, Chat_permissions::MANAGE_CAMPAIGNS);
-        $canManageAi = Chat_permissions::can($this->login_user, Chat_permissions::MANAGE_AI);
-        $canViewReports = Chat_permissions::can($this->login_user, Chat_permissions::VIEW_REPORTS);
-        $canExportReports = Chat_permissions::can($this->login_user, Chat_permissions::EXPORT_REPORTS);
+        $canManageBots = Chat_permissions::can($this->login_user, Chat_permissions::MANAGE_BOTS);
         $canManageSettings = Chat_permissions::can($this->login_user, Chat_permissions::MANAGE_SETTINGS);
         if (($activeTab === 'instances' && !$canManageInstances)
             || ($activeTab === 'contacts' && !$canManageContacts)
             || ($activeTab === 'campaigns' && !$canManageCampaigns)
-            || ($activeTab === 'ai' && !$canManageAi)
-            || ($activeTab === 'reports' && !$canViewReports)
+            || ($activeTab === 'bots' && !$canManageBots)
             || ($activeTab === 'settings' && !$canManageSettings)) {
             app_redirect('forbidden');
         }
@@ -73,14 +68,18 @@ class Chatwoot extends Security_Controller
                 fn (array $row): array => $this->conversationForView($row),
                 $conversationResult['data']
             );
-            $summary = $this->chat->dashboard_summary();
+            $summary = $activeTab === 'dashboard'
+                ? $this->chat->dashboard_summary()
+                : $this->emptySummary();
             $allPublicSettings = $this->chat->public_settings();
             $runtimePreferences = [
                 'soundEnabled' => !empty($allPublicSettings['sound_enabled']),
                 'browserNotificationsEnabled' => !empty($allPublicSettings['browser_notifications_enabled']),
             ];
             $settings = $canManageSettings ? $allPublicSettings : [];
-            $webhookLogs = $canManageInstances ? $this->chat->recent_webhook_logs(20) : [];
+            $webhookLogs = $canManageInstances && $activeTab === 'instances'
+                ? $this->chat->recent_webhook_logs(20)
+                : [];
         } catch (Throwable $exception) {
             log_message('error', 'Chatwoot_plugin page data failed ({exception_type}).', [
                 'exception_type' => get_class($exception),
@@ -89,6 +88,7 @@ class Chatwoot extends Security_Controller
             $instances = [];
             $conversations = [];
             $settings = [];
+            $allPublicSettings = [];
             $runtimePreferences = ['soundEnabled' => false, 'browserNotificationsEnabled' => false];
             $webhookLogs = [];
             $summary = $this->emptySummary();
@@ -97,7 +97,7 @@ class Chatwoot extends Security_Controller
         $moduleErrors = [];
         $contacts = [];
         $contactSummary = ['total' => 0, 'with_conversation' => 0, 'unidentified' => 0, 'opt_out' => 0];
-        if ($canManageContacts) {
+        if ($canManageContacts && $activeTab === 'contacts') {
             try {
                 $contactService = new Contact_service();
                 $contactResult = $contactService->list([], 1, 50);
@@ -115,7 +115,7 @@ class Chatwoot extends Security_Controller
 
         $campaigns = [];
         $campaignSummary = ['month' => 0, 'sent' => 0, 'delivery_rate' => '0%', 'reply_rate' => '0%'];
-        if ($canManageCampaigns) {
+        if ($canManageCampaigns && in_array($activeTab, ['dashboard', 'campaigns'], true)) {
             try {
                 $campaignService = new Campaign_service();
                 $campaigns = $campaignService->list([], 1, 50)['data'];
@@ -130,18 +130,10 @@ class Chatwoot extends Security_Controller
             } catch (Throwable $exception) { $moduleErrors['campaigns'] = 'Nao foi possivel carregar as campanhas.'; }
         }
 
-        $agents = $automations = [];
-        if ($canManageAi) {
-            try { $agents = (new Ai_service())->list_agents([], 1, 50)['data']; } catch (Throwable $exception) { $moduleErrors['ai'] = 'Nao foi possivel carregar os agentes.'; }
-            try { $automations = (new Automation_service())->list([], 1, 50)['data']; } catch (Throwable $exception) { $moduleErrors['automations'] = 'Nao foi possivel carregar as automacoes.'; }
-        }
-
-        $reports = $this->emptyReports();
-        if ($canViewReports) {
-            try {
-                $reports = (new Report_service())->generate(['period' => '7d', 'instance_id' => 'all', 'timezone' => (string) ($settings['timezone'] ?? 'America/Sao_Paulo')]);
-                $reports['volume'] = $reports['volume_values'] ?? [];
-            } catch (Throwable $exception) { $moduleErrors['reports'] = 'Nao foi possivel calcular os relatorios.'; }
+        $bots = [];
+        if ($canManageBots && in_array($activeTab, ['dashboard', 'bots'], true)) {
+            try { $bots = (new Bot_service())->list([], 1, 100)['data']; }
+            catch (Throwable $exception) { $moduleErrors['bots'] = 'Nao foi possivel carregar os bots.'; }
         }
         try { $notificationUnread = (new Notification_service())->unread_count((int) $this->login_user->id); } catch (Throwable $exception) { $notificationUnread = 0; }
         if (isset($moduleErrors[$activeTab])) $integrationError = $moduleErrors[$activeTab];
@@ -155,9 +147,7 @@ class Chatwoot extends Security_Controller
             'instances' => $instances,
             'campaigns' => $campaigns,
             'campaign_summary' => $campaignSummary,
-            'agents' => $agents,
-            'automations' => $automations,
-            'reports' => $reports,
+            'bots' => $bots,
             'notification_unread_count' => $notificationUnread,
             'webhook_logs' => $webhookLogs,
             'settings_public' => $settings,
@@ -167,9 +157,7 @@ class Chatwoot extends Security_Controller
             'can_manage_contacts' => $canManageContacts,
             'can_manage_instances' => $canManageInstances,
             'can_manage_campaigns' => $canManageCampaigns,
-            'can_manage_ai' => $canManageAi,
-            'can_view_reports' => $canViewReports,
-            'can_export_reports' => $canExportReports,
+            'can_manage_bots' => $canManageBots,
             'can_manage_settings' => $canManageSettings,
             'integration_error' => $integrationError,
             'app_config' => [
@@ -179,18 +167,14 @@ class Chatwoot extends Security_Controller
                     'instancesRefresh' => get_uri('chatwoot_plugin/api/instances/refresh-status'),
                     'conversations' => get_uri('chatwoot_plugin/api/conversations'),
                     'contacts' => get_uri('chatwoot_plugin/api/contacts'),
+                    'contactRepairs' => get_uri('chatwoot_plugin/api/contact-repairs'),
                     'campaigns' => get_uri('chatwoot_plugin/api/campaigns'),
                     'campaignTemplates' => get_uri('chatwoot_plugin/api/campaign-templates'),
-                    'aiAgents' => get_uri('chatwoot_plugin/api/ai/agents'),
-                    'automations' => get_uri('chatwoot_plugin/api/automations'),
-                    'aiState' => get_uri('chatwoot_plugin/api/ai/state'),
-                    'aiLogs' => get_uri('chatwoot_plugin/api/ai/logs'),
-                    'reports' => get_uri('chatwoot_plugin/api/reports'),
+                    'bots' => get_uri('chatwoot_plugin/api/bots'),
                     'notifications' => get_uri('chatwoot_plugin/api/notifications'),
                     'quickReplies' => get_uri('chatwoot_plugin/api/quick-replies'),
                     'search' => get_uri('chatwoot_plugin/api/search'),
                     'mediaUpload' => get_uri('chatwoot_plugin/api/media'),
-                    'n8nHealth' => get_uri('chatwoot_plugin/api/integrations/n8n/test'),
                     'notificationsReadAll' => get_uri('chatwoot_plugin/api/notifications/read-all'),
                     'settings' => get_uri('chatwoot_plugin/api/settings'),
                     'settingsTest' => get_uri('chatwoot_plugin/api/settings/test'),
@@ -199,9 +183,11 @@ class Chatwoot extends Security_Controller
                 'csrfHeader' => csrf_header(),
                 'csrfTokenName' => csrf_token(),
                 'csrfHash' => csrf_hash(),
-                'pollingIntervalMs' => (int) ($settings['polling_interval_ms'] ?? 5000),
-                'conversationPageSize' => 30,
+                'pollingIntervalMs' => (int) ($allPublicSettings['polling_interval_ms'] ?? 5000),
+                'remoteSyncIntervalMs' => max(30000, (int) ($allPublicSettings['polling_interval_ms'] ?? 5000) * 6),
+                'conversationPageSize' => (int) ($allPublicSettings['conversation_page_size'] ?? 30),
                 'messagePageSize' => 50,
+                'remoteConversationSyncLimit' => 100,
                 'preferences' => $runtimePreferences,
                 'permissions' => [
                     'send' => $canSend,
@@ -209,9 +195,7 @@ class Chatwoot extends Security_Controller
                     'manageContacts' => $canManageContacts,
                     'manageInstances' => $canManageInstances,
                     'manageCampaigns' => $canManageCampaigns,
-                    'manageAi' => $canManageAi,
-                    'viewReports' => $canViewReports,
-                    'exportReports' => $canExportReports,
+                    'manageBots' => $canManageBots,
                     'manageSettings' => $canManageSettings,
                 ],
             ],
@@ -294,24 +278,12 @@ class Chatwoot extends Security_Controller
             'open' => 0,
             'pending' => 0,
             'unassigned' => 0,
-            'sla_risk' => 0,
             'resolved_today' => 0,
             'avg_first_response' => '—',
             'online_agents' => 0,
             'high_priority' => 0,
-            'ai_resolution_rate' => '—',
             'connected_instances' => 0,
         ];
     }
 
-    /** @return array<string,array<int,mixed>> */
-    private function emptyReports(): array
-    {
-        return [
-            'volume' => [0, 0, 0, 0, 0, 0, 0],
-            'labels' => ['Qui', 'Sex', 'Sab', 'Dom', 'Seg', 'Ter', 'Qua'],
-            'channels' => [],
-            'agents' => [],
-        ];
-    }
 }

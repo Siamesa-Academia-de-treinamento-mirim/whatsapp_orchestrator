@@ -205,7 +205,7 @@ foreach (($conversations ?? []) as $conversation) {
                 <div class="impulso-composer-mode">
                     <button class="impulso-mode-button active" type="button" data-composer-mode="reply">Responder</button>
                     <button class="impulso-mode-button" type="button" data-composer-mode="note">Nota interna</button>
-                    <span class="impulso-badge primary" id="impulso-ai-suggestion-badge"><i data-feather="cpu"></i> Sugestões da IA</span>
+                    <span class="impulso-badge"><i data-feather="shield"></i> Bot com respostas definidas</span>
                 </div>
                 <div class="impulso-composer-box">
                     <div class="impulso-composer-tools">
@@ -260,10 +260,15 @@ foreach (($conversations ?? []) as $conversation) {
                 </div>
             </div>
 
+            <div class="impulso-contact-section impulso-hidden" id="impulso-group-section">
+                <div class="impulso-contact-section-title"><span>Participantes do grupo</span><span class="impulso-badge" id="impulso-group-participant-count">0</span></div>
+                <div id="impulso-group-participants"><small>Os participantes serão identificados conforme enviarem mensagens.</small></div>
+            </div>
+
             <div class="impulso-contact-section">
-                <div class="impulso-contact-section-title"><span>Contexto da IA</span><button class="btn btn-default btn-sm" type="button" data-impulso-action="toggle-ai-conversation">Gerenciar</button></div>
-                <div class="impulso-ai-runtime" id="impulso-ai-runtime"><span class="impulso-status-dot"></span><strong>Carregando estado...</strong></div>
-                <div class="impulso-code" id="impulso-ai-context">Sem resumo operacional.</div>
+                <div class="impulso-contact-section-title"><span>Bot de atendimento</span><button class="btn btn-default btn-sm" type="button" data-impulso-action="toggle-conversation-bot">Pausar</button></div>
+                <div class="impulso-contact-item"><i data-feather="shield"></i><div class="impulso-contact-item-copy"><span>Estado</span><strong id="impulso-bot-conversation-state">Ativo até um atendente responder</strong></div></div>
+                <small>Quando um atendente envia uma mensagem, o bot é pausado automaticamente para evitar respostas conflitantes.</small>
             </div>
         </aside>
     </div>

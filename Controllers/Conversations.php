@@ -7,6 +7,7 @@ namespace Chatwoot_plugin\Controllers;
 use Chatwoot_plugin\Models\Chat_conversations_model;
 use Chatwoot_plugin\Services\Chat_service;
 use Chatwoot_plugin\Services\Conversation_action_service;
+use Chatwoot_plugin\Services\Group_service;
 use CodeIgniter\HTTP\ResponseInterface;
 use Throwable;
 
@@ -70,12 +71,13 @@ class Conversations extends Api_controller
     {
         $input = $this->input();
         $instanceId = (int) ($input['instance_id'] ?? 0);
+        $limit = min(100, max(10, (int) ($input['limit'] ?? 100)));
         if ($instanceId < 0) {
             return $this->error('Instancia invalida.', 422);
         }
 
         try {
-            return $this->success($this->chat->sync_chats($instanceId > 0 ? $instanceId : null));
+            return $this->success($this->chat->sync_chats($instanceId > 0 ? $instanceId : null, $limit));
         } catch (Throwable $exception) {
             return $this->internalFailure($exception, 'Nao foi possivel sincronizar as conversas.', 502);
         }
@@ -106,6 +108,41 @@ class Conversations extends Api_controller
             $status = $this->conversations->get_by_id($id) ? 500 : 404;
 
             return $this->internalFailure($exception, $status === 404 ? 'Conversa nao encontrada.' : 'Nao foi possivel carregar o historico.', $status);
+        }
+    }
+
+    public function group(int $id): ResponseInterface
+    {
+        $conversation = $this->conversations->get_by_id($id);
+        if (!$conversation) {
+            return $this->error('Conversa nao encontrada.', 404);
+        }
+        if (($conversation['conversation_type'] ?? 'individual') !== 'group') {
+            return $this->error('Esta conversa nao representa um grupo.', 422);
+        }
+
+        try {
+            $group = (new Group_service())->get_group_for_conversation($id);
+            if (!$group) return $this->error('Dados do grupo ainda nao foram sincronizados.', 404);
+
+            $group['id'] = (int) ($group['id'] ?? 0);
+            $group['participant_count'] = count($group['participants'] ?? []);
+            $group['participants'] = array_map(static function (array $participant): array {
+                return [
+                    'id' => (int) ($participant['id'] ?? 0),
+                    'contact_id' => !empty($participant['contact_id']) ? (int) $participant['contact_id'] : null,
+                    'jid' => (string) ($participant['participant_jid'] ?? ''),
+                    'phone' => (string) ($participant['phone_normalized'] ?? ''),
+                    'name' => (string) ($participant['display_name'] ?? ''),
+                    'role' => (string) ($participant['role'] ?? 'member'),
+                    'is_self' => !empty($participant['is_self']),
+                    'last_message_at' => $participant['last_message_at'] ?? null,
+                ];
+            }, is_array($group['participants'] ?? null) ? $group['participants'] : []);
+
+            return $this->success($group);
+        } catch (Throwable $exception) {
+            return $this->internalFailure($exception, 'Nao foi possivel carregar os participantes do grupo.');
         }
     }
 
@@ -143,6 +180,30 @@ class Conversations extends Api_controller
             return $this->success($this->chat->send_text($id, $text, $clientId, $this->actorId()));
         } catch (Throwable $exception) {
             return $this->internalFailure($exception, 'Nao foi possivel enviar a mensagem.', 422);
+        }
+    }
+
+    public function send_template(int $id): ResponseInterface
+    {
+        $this->requireSendPermission();
+        $input = $this->input();
+        $name = trim((string) ($input['template_name'] ?? ''));
+        $language = trim((string) ($input['language_code'] ?? 'pt_BR'));
+        $clientId = trim((string) ($input['client_message_id'] ?? ''));
+        $components = is_array($input['components'] ?? null) ? $input['components'] : [];
+        if ($name === '' || !preg_match('/^[a-z0-9_]{1,512}$/', $name)) {
+            return $this->error('Nome de template oficial invalido.', 422);
+        }
+        if ($language === '' || strlen($language) > 20 || !preg_match('/^[A-Za-z_-]+$/', $language)) {
+            return $this->error('Idioma do template invalido.', 422);
+        }
+        if ($clientId === '' || strlen($clientId) > 191 || !preg_match('/^[A-Za-z0-9._:-]+$/', $clientId)) {
+            return $this->error('Identificador idempotente invalido.', 422);
+        }
+        try {
+            return $this->success($this->chat->send_template($id, $name, $language, $components, $clientId, $this->actorId()));
+        } catch (Throwable $exception) {
+            return $this->internalFailure($exception, 'Nao foi possivel enviar o template oficial.', 422);
         }
     }
 

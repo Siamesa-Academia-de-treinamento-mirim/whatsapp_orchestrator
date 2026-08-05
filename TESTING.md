@@ -1,40 +1,36 @@
 # Testes
 
-Execute a partir da raiz do Rise com o PHP do XAMPP disponível no `PATH`:
+## Sem runtime do Rise
 
-```powershell
-php plugins\Chatwoot_plugin\Tests\run_unit.php
-php plugins\Chatwoot_plugin\Tests\run_migration_smoke.php
-php plugins\Chatwoot_plugin\Tests\run_service_integration.php
-php plugins\Chatwoot_plugin\Tests\run_refinement_integration.php
+```bash
+php Tests/run_unit.php
+php Tests/run_product_static.php
+find . -name '*.php' -print0 | xargs -0 -n1 php -l
+node --check Assets/js/chatwoot.js
+node --check Assets/js/hub-workspace.js
 ```
 
-Cobertura principal:
+## Com Rise e banco de testes
 
-- normalização Evolution, mensagens, ordenação e idempotência;
-- migrations V001/V002/V003, índices, colunas, backfill legado e segunda execução sem perda de dados;
-- envio otimista, locks, status e sincronização com clients falsos;
-- contatos, conflitos, tags, busca server-side, resumo e opt-out;
-- campanhas, duplicação, toggle e resumo com transporte n8n falso;
-- agentes de IA, estado humano, automações e dry-run;
-- respostas rápidas, notificações e deduplicação;
-- relatórios reais e exportação CSV segura;
-- proteção SSRF e sanitização do client n8n;
-- mídia `directPath`/base64;
-- presença das rotas do contrato 1.1.0.
+A partir da raiz do Rise:
 
-O teste HTTP opcional exige Apache ativo e uma instalação local acessível:
-
-```powershell
-php plugins\Chatwoot_plugin\Tests\run_webhook_http.php
+```bash
+php plugins/Chatwoot_plugin/Tests/run_migration_smoke.php
+php plugins/Chatwoot_plugin/Tests/run_service_integration.php
+php plugins/Chatwoot_plugin/Tests/run_refinement_integration.php
 ```
 
-Os testes de integração criam registros com identificadores aleatórios e os removem no bloco de limpeza. O transporte n8n e os clients de envio usados na suíte são falsos; eles não disparam campanhas nem mensagens reais.
+Use banco descartável. Os testes de migração validam V001–V009, segunda execução idempotente, índices e preservação de dados. Os testes de serviço usam clientes falsos e não devem enviar mensagens reais.
 
-Antes de publicar, execute também:
+## Homologação manual mínima
 
-```powershell
-Get-ChildItem plugins\Chatwoot_plugin -Recurse -Filter *.php | ForEach-Object { php -l $_.FullName }
-node --check plugins\Chatwoot_plugin\Assets\js\chatwoot.js
-node --check plugins\Chatwoot_plugin\Assets\js\hub-workspace.js
-```
+1. receber e responder contato individual pela Evolution;
+2. enviar mensagem e confirmar que o nome do cliente não muda;
+3. receber mensagens de dois participantes no mesmo grupo;
+4. verificar, receber e responder pelo canal Meta;
+5. testar bloqueio de texto Meta fora da janela e envio de template;
+6. publicar bot, testar fallback, handoff e pausa humana;
+7. executar campanha pequena, conferir retry e recibos;
+8. editar campanha recorrente e confirmar histórico imutável;
+9. validar opt-out no momento do envio;
+10. testar permissões de operador sem acesso administrativo.

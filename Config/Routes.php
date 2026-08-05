@@ -31,8 +31,10 @@ $routes->group('chatwoot_plugin', $route_options, static function ($routes): voi
     $routes->post('api/conversations', 'Conversations::create');
     $routes->post('api/conversations/sync', 'Conversations::sync');
     $routes->get('api/conversations/(:num)/messages', 'Conversations::messages/$1');
+    $routes->get('api/conversations/(:num)/group', 'Conversations::group/$1');
     $routes->post('api/conversations/(:num)/messages/sync', 'Conversations::sync_messages/$1');
     $routes->post('api/conversations/(:num)/messages', 'Conversations::send/$1');
+    $routes->post('api/conversations/(:num)/templates', 'Conversations::send_template/$1');
     $routes->post('api/conversations/(:num)/read', 'Conversations::mark_read/$1');
     $routes->post('api/conversations/(:num)/attachments', 'Media::send/$1');
     $routes->post('api/conversations/(:num)/notes', 'Conversations::note/$1');
@@ -55,6 +57,8 @@ $routes->group('chatwoot_plugin', $route_options, static function ($routes): voi
     $routes->put('api/contacts/(:num)', 'Contacts::update/$1');
     $routes->delete('api/contacts/(:num)', 'Contacts::delete/$1');
     $routes->post('api/contacts/(:num)/opt-out', 'Contacts::opt_out/$1');
+    $routes->get('api/contact-repairs/preview', 'Contact_repairs::preview');
+    $routes->post('api/contact-repairs/apply', 'Contact_repairs::apply');
 
     $routes->get('api/quick-replies', 'Quick_replies::index');
     $routes->post('api/quick-replies', 'Quick_replies::create');
@@ -70,39 +74,30 @@ $routes->group('chatwoot_plugin', $route_options, static function ($routes): voi
     $routes->delete('api/campaigns/(:num)', 'Campaigns::delete/$1');
     $routes->post('api/campaigns/(:num)/duplicate', 'Campaigns::duplicate/$1');
     $routes->post('api/campaigns/(:num)/toggle', 'Campaigns::toggle/$1');
+    $routes->get('api/campaigns/(:num)/runs', 'Campaigns::runs/$1');
+    $routes->get('api/campaigns/(:num)/runs/(:num)/recipients', 'Campaigns::run_recipients/$1/$2');
     $routes->get('api/campaign-templates', 'Campaign_templates::index');
     $routes->post('api/campaign-templates', 'Campaign_templates::create');
     $routes->put('api/campaign-templates/(:num)', 'Campaign_templates::update/$1');
     $routes->delete('api/campaign-templates/(:num)', 'Campaign_templates::delete/$1');
+    $routes->get('api/instances/(:num)/official-templates', 'Official_templates::index/$1');
+    $routes->post('api/instances/(:num)/official-templates/sync', 'Official_templates::sync/$1');
 
-    $routes->get('api/ai/agents', 'Ai_agents::index');
-    $routes->post('api/ai/agents', 'Ai_agents::create');
-    $routes->get('api/ai/agents/(:num)', 'Ai_agents::show/$1');
-    $routes->put('api/ai/agents/(:num)', 'Ai_agents::update/$1');
-    $routes->delete('api/ai/agents/(:num)', 'Ai_agents::delete/$1');
-    $routes->post('api/ai/agents/(:num)/toggle', 'Ai_agents::toggle/$1');
-    $routes->get('api/ai/state/health', 'Ai_state::health');
-    $routes->get('api/ai/state/(:num)', 'Ai_state::show/$1');
-    $routes->post('api/ai/state/(:num)', 'Ai_state::update/$1');
-    $routes->post('api/ai/state/(:num)/instance', 'Ai_state::instance/$1');
-    $routes->get('api/ai/logs', 'Ai_logs::index');
+    $routes->get('api/bots', 'Bots::index');
+    $routes->post('api/bots', 'Bots::create');
+    $routes->post('api/bots/simulate', 'Bots::simulate');
+    $routes->get('api/bots/(:num)', 'Bots::show/$1');
+    $routes->put('api/bots/(:num)', 'Bots::update/$1');
+    $routes->delete('api/bots/(:num)', 'Bots::delete/$1');
+    $routes->post('api/bots/(:num)/publish', 'Bots::publish/$1');
+    $routes->post('api/bots/(:num)/toggle', 'Bots::toggle/$1');
+    $routes->post('api/conversations/(:num)/bot/pause', 'Bots::pause_conversation/$1');
+    $routes->post('api/conversations/(:num)/bot/resume', 'Bots::resume_conversation/$1');
 
-    $routes->get('api/automations', 'Automations::index');
-    $routes->post('api/automations', 'Automations::create');
-    $routes->get('api/automations/(:num)', 'Automations::show/$1');
-    $routes->put('api/automations/(:num)', 'Automations::update/$1');
-    $routes->delete('api/automations/(:num)', 'Automations::delete/$1');
-    $routes->post('api/automations/(:num)/toggle', 'Automations::toggle/$1');
-    $routes->post('api/automations/(:num)/test', 'Automations::test/$1');
-
-    $routes->post('api/integrations/n8n/test', 'Integrations::n8n_test');
-    $routes->get('api/reports/export', 'Reports::export');
-    $routes->get('api/reports', 'Reports::index');
     $routes->get('api/notifications', 'Notifications::index');
     $routes->post('api/notifications/read-all', 'Notifications::read_all');
     $routes->post('api/notifications/(:num)/read', 'Notifications::read/$1');
     $routes->get('api/search', 'Search::index');
-    $routes->get('api/audit-logs', 'Audit_logs::index');
 
     $routes->get('api/session/csrf', 'Api_session::csrf');
 
@@ -119,3 +114,6 @@ $routes->post('chatwoot_plugin/webhooks/evolution', 'Webhooks::evolution', [
 $routes->get('chatwoot_plugin/media/(:num)', 'Media_public::show/$1', [
     'namespace' => 'Chatwoot_plugin\Controllers',
 ]);
+
+$routes->get('chatwoot_plugin/webhooks/meta/(:segment)', 'Meta_webhooks::verify/$1', ['namespace' => 'Chatwoot_plugin\Controllers']);
+$routes->post('chatwoot_plugin/webhooks/meta/(:segment)', 'Meta_webhooks::receive/$1', ['namespace' => 'Chatwoot_plugin\Controllers']);

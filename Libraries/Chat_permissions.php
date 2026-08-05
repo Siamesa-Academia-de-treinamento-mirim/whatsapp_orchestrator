@@ -14,9 +14,13 @@ final class Chat_permissions
     public const MANAGE_CONTACTS = 'chatwoot_plugin_manage_contacts';
     public const MANAGE_INSTANCES = 'chatwoot_plugin_manage_instances';
     public const MANAGE_CAMPAIGNS = 'chatwoot_plugin_manage_campaigns';
+    /** @deprecated Legacy permission kept only to read old role payloads. */
     public const MANAGE_AI = 'chatwoot_plugin_manage_ai';
+    /** @deprecated Legacy permission kept only to read old role payloads. */
     public const VIEW_REPORTS = 'chatwoot_plugin_view_reports';
+    /** @deprecated Legacy permission kept only to read old role payloads. */
     public const EXPORT_REPORTS = 'chatwoot_plugin_export_reports';
+    public const MANAGE_BOTS = 'chatwoot_plugin_manage_bots';
     public const MANAGE_SETTINGS = 'chatwoot_plugin_manage_settings';
     public const VIEW_AUDIT_LOGS = 'chatwoot_plugin_view_audit_logs';
 
@@ -27,9 +31,7 @@ final class Chat_permissions
         self::MANAGE_CONTACTS,
         self::MANAGE_INSTANCES,
         self::MANAGE_CAMPAIGNS,
-        self::MANAGE_AI,
-        self::VIEW_REPORTS,
-        self::EXPORT_REPORTS,
+        self::MANAGE_BOTS,
         self::MANAGE_SETTINGS,
         self::VIEW_AUDIT_LOGS,
     ];
@@ -55,23 +57,15 @@ final class Chat_permissions
             ],
             self::MANAGE_INSTANCES => [
                 'language_key' => 'chatwoot_permission_manage_instances',
-                'fallback' => 'Gerenciar instancias Evolution',
+                'fallback' => 'Gerenciar canais WhatsApp',
             ],
             self::MANAGE_CAMPAIGNS => [
                 'language_key' => 'chatwoot_permission_manage_campaigns',
                 'fallback' => 'Gerenciar campanhas',
             ],
-            self::MANAGE_AI => [
-                'language_key' => 'chatwoot_permission_manage_ai',
-                'fallback' => 'Gerenciar IA e automacoes',
-            ],
-            self::VIEW_REPORTS => [
-                'language_key' => 'chatwoot_permission_view_reports',
-                'fallback' => 'Visualizar relatorios',
-            ],
-            self::EXPORT_REPORTS => [
-                'language_key' => 'chatwoot_permission_export_reports',
-                'fallback' => 'Exportar relatorios',
+            self::MANAGE_BOTS => [
+                'language_key' => 'chatwoot_permission_manage_bots',
+                'fallback' => 'Gerenciar bots determinísticos',
             ],
             self::MANAGE_SETTINGS => [
                 'language_key' => 'chatwoot_permission_manage_settings',
@@ -79,7 +73,7 @@ final class Chat_permissions
             ],
             self::VIEW_AUDIT_LOGS => [
                 'language_key' => 'chatwoot_permission_view_audit_logs',
-                'fallback' => 'Visualizar logs de auditoria',
+                'fallback' => 'Visualizar logs tecnicos',
             ],
         ];
     }
@@ -100,6 +94,11 @@ final class Chat_permissions
 
         $permissions = is_array($user->permissions ?? null) ? $user->permissions : [];
         if (!empty($permissions[$permission])) {
+            return true;
+        }
+        // Roles created before 2.0 used the settings permission to manage all
+        // automations. Preserve that access until the role is saved again.
+        if ($permission === self::MANAGE_BOTS && !empty($permissions[self::MANAGE_SETTINGS])) {
             return true;
         }
 

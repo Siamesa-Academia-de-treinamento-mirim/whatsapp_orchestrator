@@ -6,7 +6,7 @@ $campaignSummary = is_array($campaign_summary ?? null) ? $campaign_summary : [];
     <div class="impulso-section-heading">
         <div>
             <h2>Campanhas</h2>
-            <p>Crie, agende e acompanhe disparos executados pelos fluxos do n8n.</p>
+            <p>Crie, agende e acompanhe disparos pela fila interna do plugin, em canais Evolution ou oficiais.</p>
         </div>
         <div class="impulso-section-actions">
             <button class="btn btn-default" type="button" data-impulso-action="campaign-templates"><i data-feather="file-text"></i> Templates</button>
@@ -79,7 +79,7 @@ $campaignSummary = is_array($campaign_summary ?? null) ? $campaign_summary : [];
             <div class="impulso-empty <?php echo $campaigns ? 'impulso-hidden' : ''; ?>" id="impulso-campaign-empty">
                 <div class="impulso-empty-icon"><i data-feather="send"></i></div>
                 <h4>Nenhuma campanha encontrada</h4>
-                <p>Crie uma campanha para disparar mensagens por uma instância da Evolution.</p>
+                <p>Crie uma campanha para disparar mensagens por um canal Evolution ou WhatsApp Cloud API.</p>
                 <button class="btn btn-primary" type="button" data-impulso-action="new-campaign"><i data-feather="plus"></i> Criar campanha</button>
             </div>
         </div>
@@ -87,14 +87,14 @@ $campaignSummary = is_array($campaign_summary ?? null) ? $campaign_summary : [];
 
     <div class="impulso-grid impulso-grid-2">
         <div class="impulso-card">
-            <div class="impulso-card-header"><div><h3>Próximas execuções</h3><p>Agendamentos devolvidos pelo n8n</p></div><button class="btn btn-default btn-sm" type="button" data-impulso-action="campaign-calendar"><i data-feather="calendar"></i> Calendário</button></div>
+            <div class="impulso-card-header"><div><h3>Próximas execuções</h3><p>Agendamentos e recorrências da fila interna</p></div><button class="btn btn-default btn-sm" type="button" data-impulso-action="campaign-calendar"><i data-feather="calendar"></i> Calendário</button></div>
             <div class="impulso-card-body" id="impulso-campaign-schedule-list"><div class="impulso-empty compact"><p>Nenhuma execução próxima.</p></div></div>
         </div>
         <div class="impulso-card">
-            <div class="impulso-card-header"><div><h3>Saúde do disparador</h3><p>Estado dos webhooks e da fila do n8n</p></div><button class="btn btn-default btn-sm" type="button" data-impulso-action="test-campaign-backend"><i data-feather="activity"></i> Testar</button></div>
+            <div class="impulso-card-header"><div><h3>Saúde do disparador</h3><p>Estado da fila interna e dos canais configurados</p></div><button class="btn btn-default btn-sm" type="button" data-impulso-action="test-campaign-backend"><i data-feather="activity"></i> Testar</button></div>
             <div class="impulso-card-body" id="impulso-campaign-health">
-                <div class="impulso-setting-row"><div class="impulso-setting-copy"><strong>API do n8n</strong><span>Verificação ainda não executada</span></div><span class="impulso-badge neutral">Não testada</span></div>
-                <div class="impulso-setting-row"><div class="impulso-setting-copy"><strong>Fila de disparo</strong><span>Monitoramento fornecido pelo backend</span></div><span class="impulso-badge neutral">—</span></div>
+                <div class="impulso-setting-row"><div class="impulso-setting-copy"><strong>Processador interno</strong><span>Verificação ainda não executada</span></div><span class="impulso-badge neutral">Não testada</span></div>
+                <div class="impulso-setting-row"><div class="impulso-setting-copy"><strong>Destinatários pendentes</strong><span>Calculado diretamente no banco do plugin</span></div><span class="impulso-badge neutral">—</span></div>
                 <div class="impulso-setting-row"><div class="impulso-setting-copy"><strong>Última execução</strong><span>Sem dados carregados</span></div><span class="impulso-badge neutral">—</span></div>
             </div>
         </div>

@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Chatwoot_plugin\Services;
 
-use Chatwoot_plugin\Libraries\Evolution_client;
 use Chatwoot_plugin\Models\Chat_conversations_model;
 use Chatwoot_plugin\Models\Chat_instances_model;
 use Chatwoot_plugin\Models\Chat_media_model;
@@ -42,7 +41,8 @@ class Media_service
         private ?Chat_conversations_model $conversations = null,
         private ?Chat_instances_model $instances = null,
         private ?Chat_settings_model $settings = null,
-        private ?Audit_service $audit = null
+        private ?Audit_service $audit = null,
+        private ?Provider_manager $providers = null
     ) {
         $this->media ??= new Chat_media_model();
         $this->messages ??= new Chat_messages_model();
@@ -50,6 +50,7 @@ class Media_service
         $this->instances ??= new Chat_instances_model();
         $this->settings ??= new Chat_settings_model();
         $this->audit ??= new Audit_service();
+        $this->providers ??= new Provider_manager($this->instances, $this->settings);
     }
 
     public function send(int $conversationId, UploadedFile $file, string $caption, string $clientMessageId, int $actorId): array
@@ -146,21 +147,50 @@ class Media_service
                 throw new RuntimeException('O numero real deste contato @lid ainda nao foi resolvido.', 409);
             }
         }
-        $instance['api_key'] = $this->instances->get_decrypted_api_key((int) $instance['id']) ?: '';
-        $client = new Evolution_client(['instance' => $instance, 'timeout' => (int) $this->settings->get_value(Chat_settings_model::EVOLUTION_TIMEOUT_SECONDS, 30)], null, $this->settings);
+        $provider = $this->providers->forInstance($instance);
+        $capabilities = $provider->capabilities();
+        if (str_ends_with(strtolower((string) $conversation['remote_jid']), '@g.us') && empty($capabilities['supports_groups'])) {
+            $this->messages->update_message($messageId, ['status'=>'failed','delivery_error'=>'O provedor oficial nao suporta grupos.','failed_at'=>gmdate('Y-m-d H:i:s')]);
+            throw new RuntimeException('O provedor deste canal nao suporta grupos.', 422);
+        }
+        if ($provider->name() === 'meta_cloud') {
+            $expires = trim((string) ($conversation['service_window_expires_at'] ?? ''));
+            if ($expires === '' || strtotime($expires) === false || strtotime($expires) <= time()) {
+                $this->messages->update_message($messageId, ['status'=>'failed','delivery_error'=>'Janela oficial encerrada; use um template aprovado.','failed_at'=>gmdate('Y-m-d H:i:s')]);
+                throw new RuntimeException('A janela de atendimento oficial esta encerrada. Envie um template aprovado antes da midia.', 409);
+            }
+        }
         $path = $directory . DIRECTORY_SEPARATOR . $storedName;
-        $base64 = base64_encode((string) file_get_contents($path));
-        $response = $client->send_media($number, $base64, $mime, $mediaType, $original, $caption);
+        $mediaPayload = [
+            'type'=>$mediaType, 'mime_type'=>$mime, 'filename'=>$original, 'caption'=>$caption,
+        ];
+        if ($provider->name() === 'meta_cloud') {
+            $link = $this->signedUrl($mediaId, 86400);
+            if (!str_starts_with(strtolower($link), 'https://')) throw new RuntimeException('A API oficial exige uma URL HTTPS publica para enviar a midia.', 422);
+            $mediaPayload['link'] = $link;
+        } else {
+            $mediaPayload['data'] = base64_encode((string) file_get_contents($path));
+        }
+        $response = $provider->sendMedia($number, $mediaPayload, ['conversation_id'=>$conversationId,'client_message_id'=>$clientMessageId]);
         if (empty($response['success'])) {
-            $error = mb_substr((string) ($response['error'] ?? 'A Evolution API nao confirmou o envio.'), 0, 1000);
-            $this->messages->update_message($messageId, ['status' => 'failed', 'delivery_error' => $error, 'failed_at' => gmdate('Y-m-d H:i:s')]);
-            $this->audit->record($actorId, 'message.media_failed', 'message', $messageId, (int) $instance['id'], [], ['media_id' => $mediaId, 'error' => $error]);
+            $error = mb_substr((string) ($response['error'] ?? 'O provedor nao confirmou o envio.'), 0, 1000);
+            $this->messages->update_message($messageId, ['status' => 'failed', 'provider_name'=>$provider->name(), 'delivery_error' => $error, 'failed_at' => gmdate('Y-m-d H:i:s')]);
+            $this->audit->record($actorId, 'message.media_failed', 'message', $messageId, (int) $instance['id'], [], ['media_id' => $mediaId, 'provider'=>$provider->name(), 'error' => $error]);
             throw new RuntimeException($error, 502);
         }
         $externalId = trim((string) ($response['message_id'] ?? '')) ?: null;
-        $this->messages->update_message($messageId, ['external_message_id' => $externalId, 'status' => 'sent', 'delivery_error' => null, 'failed_at' => null]);
+        $this->messages->update_message($messageId, ['external_message_id' => $externalId, 'provider_name'=>$provider->name(), 'provider_payload_id'=>$externalId, 'status' => 'sent', 'delivery_error' => null, 'failed_at' => null]);
         $preview = $caption !== '' ? $caption : '[' . $mediaType . '] ' . $original;
         $this->conversations->upsert_conversation((int) $instance['id'], (string) $conversation['remote_jid'], ['last_message_preview' => $preview, 'last_message_at' => gmdate('Y-m-d H:i:s', $now), 'last_human_message_at' => gmdate('Y-m-d H:i:s', $now)]);
+        if ($actorId > 0) {
+            try {
+                (new Bot_service())->pauseConversation($conversationId, $actorId, 'human_media');
+            } catch (\Throwable $exception) {
+                log_message('error', 'Could not pause deterministic bot after human media: {message}', [
+                    'message' => $exception->getMessage(),
+                ]);
+            }
+        }
         $saved = $this->messages->get_by_id($messageId) ?: [];
         $this->audit->record($actorId, 'message.media_sent', 'message', $messageId, (int) $instance['id'], [], ['media_id' => $mediaId, 'message_type' => $mediaType]);
         return $this->projectMessage($saved);

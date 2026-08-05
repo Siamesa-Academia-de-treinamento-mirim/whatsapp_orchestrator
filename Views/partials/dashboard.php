@@ -2,7 +2,7 @@
     <div class="impulso-section-heading">
         <div>
             <h2>Visão geral</h2>
-            <p>Acompanhe conversas e instâncias sincronizadas com a Evolution API.</p>
+            <p>Acompanhe conversas, canais oficiais e não oficiais e a operação dos bots.</p>
         </div>
         <div class="impulso-section-actions">
             <button class="btn btn-default" type="button" data-impulso-action="refresh-dashboard"><i data-feather="refresh-cw"></i> Atualizar</button>
@@ -44,11 +44,11 @@
         <div class="impulso-card impulso-stat-card">
             <div class="impulso-stat-top">
                 <div>
-                    <div class="impulso-stat-label">Resolução pela IA</div>
-                    <div class="impulso-stat-value"><?php echo esc($summary['ai_resolution_rate']); ?></div>
-                    <div class="impulso-stat-trend">Calculada quando a integração de IA estiver ativa</div>
+                    <div class="impulso-stat-label">Canais conectados</div>
+                    <div class="impulso-stat-value"><?php echo (int) $summary['connected_instances']; ?></div>
+                    <div class="impulso-stat-trend">Evolution e WhatsApp Cloud API</div>
                 </div>
-                <div class="impulso-stat-icon info"><i data-feather="cpu"></i></div>
+                <div class="impulso-stat-icon info"><i data-feather="smartphone"></i></div>
             </div>
         </div>
     </div>
@@ -87,7 +87,7 @@
 
         <div class="impulso-card">
             <div class="impulso-card-header">
-                <div><h3>Saúde das instâncias</h3><p>Conectividade com a Evolution API</p></div>
+                <div><h3>Saúde dos canais</h3><p>Conectividade por provedor WhatsApp</p></div>
                 <?php if (!empty($can_manage_instances)) { ?><a href="<?php echo get_uri('chatwoot_plugin?chatwoot_tab=instances'); ?>" class="btn btn-default btn-sm">Gerenciar</a><?php } ?>
             </div>
             <div class="impulso-card-body">
@@ -98,7 +98,7 @@
                     ?>
                     <li class="impulso-list-item">
                         <div class="impulso-avatar sm"><?php echo esc(substr($instance['name'], 0, 2)); ?></div>
-                        <div class="impulso-list-copy"><strong><?php echo esc($instance['name']); ?></strong><span><?php echo esc($instance['phone']); ?></span></div>
+                        <div class="impulso-list-copy"><strong><?php echo esc($instance['name']); ?></strong><span><?php echo esc(($instance['provider_type'] ?? 'evolution') === 'meta_cloud' ? 'WhatsApp Cloud API' : 'Evolution API'); ?><?php echo !empty($instance['phone']) ? ' · ' . esc($instance['phone']) : ''; ?></span></div>
                         <div class="impulso-list-side"><span class="impulso-badge <?php echo esc($status_class); ?>"><span class="impulso-dot"></span><?php echo esc($status_label); ?></span></div>
                     </li>
                     <?php } ?>
@@ -124,7 +124,7 @@
         </div>
 
         <?php if (!empty($can_manage_campaigns)) { ?><div class="impulso-card">
-            <div class="impulso-card-header"><div><h3>Campanhas ativas</h3><p>Disparos e agendamentos processados pelo n8n</p></div><a class="btn btn-default btn-sm" href="<?php echo get_uri('chatwoot_plugin?chatwoot_tab=campaigns'); ?>">Abrir campanhas</a></div>
+            <div class="impulso-card-header"><div><h3>Campanhas ativas</h3><p>Fila interna, templates oficiais e disparos Evolution</p></div><a class="btn btn-default btn-sm" href="<?php echo get_uri('chatwoot_plugin?chatwoot_tab=campaigns'); ?>">Abrir campanhas</a></div>
             <div class="impulso-card-body">
                 <?php foreach (array_slice($campaigns, 0, 3) as $campaign) {
                     $percent = $campaign['audience'] > 0 ? round(($campaign['sent'] / $campaign['audience']) * 100) : 0;
@@ -141,18 +141,18 @@
             </div>
         </div><?php } ?>
 
-        <?php if (!empty($can_manage_ai)) { ?><div class="impulso-card">
-            <div class="impulso-card-header"><div><h3>Agentes de IA</h3><p>Estado operacional dos fluxos conectados ao n8n</p></div><a class="btn btn-default btn-sm" href="<?php echo get_uri('chatwoot_plugin?chatwoot_tab=ai'); ?>">Gerenciar IA</a></div>
+        <?php if (!empty($can_manage_settings)) { ?><div class="impulso-card">
+            <div class="impulso-card-header"><div><h3>Bots determinísticos</h3><p>Fluxos publicados com respostas previamente definidas</p></div><a class="btn btn-default btn-sm" href="<?php echo get_uri('chatwoot_plugin?chatwoot_tab=bots'); ?>">Gerenciar bots</a></div>
             <div class="impulso-card-body">
                 <ul class="impulso-list">
-                    <?php foreach (array_slice($agents, 0, 4) as $agent) { ?>
+                    <?php foreach (array_slice(($bots ?? []), 0, 4) as $bot) { ?>
                     <li class="impulso-list-item">
-                        <div class="impulso-stat-icon <?php echo $agent['status'] ? 'success' : ''; ?>"><i data-feather="cpu"></i></div>
-                        <div class="impulso-list-copy"><strong><?php echo esc($agent['name']); ?></strong><span><?php echo esc($agent['model']); ?> · <?php echo (int) $agent['handled']; ?> atendimentos</span></div>
-                        <div class="impulso-list-side"><span class="impulso-badge <?php echo $agent['status'] ? 'success' : 'neutral'; ?>"><?php echo $agent['status'] ? 'Ativa' : 'Inativa'; ?></span></div>
+                        <div class="impulso-stat-icon <?php echo !empty($bot['active']) ? 'success' : ''; ?>"><i data-feather="git-branch"></i></div>
+                        <div class="impulso-list-copy"><strong><?php echo esc($bot['name'] ?? 'Bot'); ?></strong><span>Versão <?php echo (int) ($bot['version'] ?? 1); ?> · <?php echo !empty($bot['published_at']) ? 'publicado' : 'rascunho'; ?></span></div>
+                        <div class="impulso-list-side"><span class="impulso-badge <?php echo !empty($bot['active']) ? 'success' : 'neutral'; ?>"><?php echo !empty($bot['active']) ? 'Ativo' : 'Inativo'; ?></span></div>
                     </li>
                     <?php } ?>
-                    <?php if (!$agents) { ?><li class="impulso-list-item"><div class="impulso-list-copy"><span>Nenhum agente de IA configurado.</span></div></li><?php } ?>
+                    <?php if (empty($bots)) { ?><li class="impulso-list-item"><div class="impulso-list-copy"><span>Nenhum bot configurado.</span></div></li><?php } ?>
                 </ul>
             </div>
         </div><?php } ?>

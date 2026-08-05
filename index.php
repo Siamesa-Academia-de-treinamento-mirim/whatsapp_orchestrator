@@ -2,10 +2,14 @@
 
 defined('PLUGINPATH') or exit('No direct script access allowed');
 
+if (!defined('CHATWOOT_PLUGIN_FOLDER')) {
+    define('CHATWOOT_PLUGIN_FOLDER', basename(__DIR__));
+}
+
 /*
 Plugin Name: Impulso Hub Atendimento
-Description: Front nativo de atendimento omnichannel para o Rise CRM, inspirado no ImpulsoHub/Chatwoot.
-Version: 1.1.0
+Description: Central especializada de atendimento WhatsApp para o Rise CRM, com Evolution API, Meta Cloud API, campanhas e bots determinísticos.
+Version: 2.0.0
 Requires at least: 3.9.6
 */
 
@@ -75,8 +79,7 @@ if (!function_exists('impulso_hub_sections')) {
             'contacts' => ['name' => 'Contatos', 'class' => 'users'],
             'instances' => ['name' => 'Instancias', 'class' => 'smartphone'],
             'campaigns' => ['name' => 'Campanhas', 'class' => 'send'],
-            'ai' => ['name' => 'IA e Automacoes', 'class' => 'cpu'],
-            'reports' => ['name' => 'Relatorios', 'class' => 'bar-chart-2'],
+            'bots' => ['name' => 'Bots', 'class' => 'git-branch'],
             'settings' => ['name' => 'Configuracoes', 'class' => 'settings'],
         ];
     }
@@ -96,8 +99,7 @@ if (!function_exists('impulso_hub_left_menu_items')) {
             'contacts' => Chat_permissions::MANAGE_CONTACTS,
             'instances' => Chat_permissions::MANAGE_INSTANCES,
             'campaigns' => Chat_permissions::MANAGE_CAMPAIGNS,
-            'ai' => Chat_permissions::MANAGE_AI,
-            'reports' => Chat_permissions::VIEW_REPORTS,
+            'bots' => Chat_permissions::MANAGE_BOTS,
             'settings' => Chat_permissions::MANAGE_SETTINGS,
         ];
 
@@ -155,9 +157,9 @@ app_hooks()->add_filter('app_filter_role_permissions_save_data', static function
 });
 
 if (function_exists('register_installation_hook')) {
-    register_installation_hook('Chatwoot_plugin', 'chatwoot_plugin_install_or_update');
-    register_activation_hook('Chatwoot_plugin', 'chatwoot_plugin_install_or_update');
-    register_update_hook('Chatwoot_plugin', 'chatwoot_plugin_install_or_update');
+    register_installation_hook(CHATWOOT_PLUGIN_FOLDER, 'chatwoot_plugin_install_or_update');
+    register_activation_hook(CHATWOOT_PLUGIN_FOLDER, 'chatwoot_plugin_install_or_update');
+    register_update_hook(CHATWOOT_PLUGIN_FOLDER, 'chatwoot_plugin_install_or_update');
 }
 
 if (function_exists('service')) {

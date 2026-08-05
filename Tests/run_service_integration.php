@@ -36,6 +36,8 @@ class Chat_service_test_evolution_client extends Chatwoot_plugin\Libraries\Evolu
     public int $statusCalls = 0;
     public string $nextMessageId = 'SIMULATED-SEND-1';
     public string $lastSendNumber = '';
+    public array $lastChatFilters = [];
+    public array $lastMessageOptions = [];
     public array $lastPostPayload = [];
     public string $lastPostPath = '';
     private string $instanceName;
@@ -47,6 +49,8 @@ class Chat_service_test_evolution_client extends Chatwoot_plugin\Libraries\Evolu
 
     public function find_chats(array $filters = [], $instance = null): array
     {
+        $this->lastChatFilters = $filters;
+
         return [
             'success' => true,
             'data' => [[
@@ -103,6 +107,8 @@ class Chat_service_test_evolution_client extends Chatwoot_plugin\Libraries\Evolu
 
     public function find_messages(string $remoteJid, array $options = [], $instance = null): array
     {
+        $this->lastMessageOptions = $options;
+
         return [
             'success' => true,
             'data' => [
@@ -303,13 +309,17 @@ try {
     ]);
     $futureRetried = $chat->process_webhook_event($futureStatusPayload);
     $futureMessage = $messages->find_by_external_id($instanceId, $futureExternalId);
+    $futureRaw = json_decode((string) ($futureMessage['raw_payload'] ?? ''), true);
     $assert(!empty($futureRetried['processed']), 'pending status could not be reprocessed');
     $assert(($futureMessage['status'] ?? '') === 'delivered', 'reprocessed status was not applied');
+    $assert(($futureRaw['source'] ?? '') === 'provider_event_compact', 'text webhook retained the complete provider envelope');
+    $assert(strlen((string) ($futureMessage['raw_payload'] ?? '')) < 1024, 'compact text payload exceeded its storage budget');
 
     $sync = $chat->sync_chats($instanceId);
     $instance = $instances->get_by_id($instanceId);
     $conversation = $conversations->get_by_remote_jid($instanceId, '5511888888888@s.whatsapp.net');
     $assert(($sync['chats'] ?? 0) === 1, 'Evolution chat list was not synchronized');
+    $assert($fakeClient->lastChatFilters === ['page' => 1, 'offset' => 100], 'chat synchronization was not page-bounded');
     $assert(($instance['connection_status'] ?? '') === 'disconnected', 'findChats falsely marked the instance connected');
     $assert(!empty($instance['last_sync_at']), 'successful findChats did not update last_sync_at');
     $assert($fakeClient->statusCalls >= 1, 'connectionState was not consulted after sync');
@@ -330,6 +340,7 @@ try {
     $historyExternalIds = array_column($history['data'], 'external_message_id');
     $assert(in_array('HISTORY-TEST-1', $historyExternalIds, true), 'Evolution history was not normalized and persisted');
     $assert(($history['meta']['sync_error'] ?? null) === null, 'history sync reported an unexpected error');
+    $assert($fakeClient->lastMessageOptions === ['page' => 1, 'offset' => 50], 'history synchronization was not page-bounded');
 
     $orderedRemoteJid = '551177770001@s.whatsapp.net';
     $orderedBase = time() - 600;

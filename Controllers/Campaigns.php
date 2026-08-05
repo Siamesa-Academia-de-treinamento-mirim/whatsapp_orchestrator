@@ -27,6 +27,27 @@ class Campaigns extends Api_controller
     public function delete(int $id): ResponseInterface { $this->requireManageCampaignsPermission(); try { $this->service->delete($id, $this->actorId()); return $this->success(['id' => $id, 'deleted' => true]); } catch (Throwable $e) { return $this->failure($e); } }
     public function duplicate(int $id): ResponseInterface { $this->requireManageCampaignsPermission(); try { return $this->success($this->service->duplicate($id, $this->actorId()), [], 201); } catch (Throwable $e) { return $this->failure($e); } }
     public function toggle(int $id): ResponseInterface { $this->requireManageCampaignsPermission(); try { return $this->success($this->service->toggle($id, $this->actorId())); } catch (Throwable $e) { return $this->failure($e); } }
+    public function runs(int $id): ResponseInterface
+    {
+        $this->requireManageCampaignsPermission();
+        try {
+            $result = $this->service->runs($id, max(1, (int) $this->request->getGet('page')), min(100, max(1, (int) ($this->request->getGet('limit') ?: 20))));
+            return $this->success($result['data'], ['meta' => $result['meta']]);
+        } catch (Throwable $e) { return $this->failure($e); }
+    }
+
+    public function run_recipients(int $id, int $runId): ResponseInterface
+    {
+        $this->requireManageCampaignsPermission();
+        try {
+            $result = $this->service->run_recipients($id, $runId, [
+                'status' => $this->request->getGet('status'),
+                'search' => $this->request->getGet('search'),
+            ], max(1, (int) $this->request->getGet('page')), min(200, max(1, (int) ($this->request->getGet('limit') ?: 50))));
+            return $this->success($result['data'], ['meta' => $result['meta']]);
+        } catch (Throwable $e) { return $this->failure($e); }
+    }
+
     public function audience_preview(): ResponseInterface { $this->requireManageCampaignsPermission(); try { $data = $this->service->audience_preview($this->input()); unset($data['recipients']); return $this->success($data); } catch (Throwable $e) { return $this->failure($e); } }
     public function health(): ResponseInterface { $this->requireManageCampaignsPermission(); return $this->success($this->service->health()); }
 

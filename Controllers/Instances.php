@@ -98,7 +98,7 @@ class Instances extends Api_controller
             return $this->error('Instancia nao encontrada.', 404);
         }
 
-        $validation = $this->validatePayload($this->input(), false);
+        $validation = $this->validatePayload($this->input(), false, $existing);
         $next = $validation['data'];
         if (array_key_exists('base_url', $next)) {
             $oldBaseUrl = trim((string) ($existing['base_url'] ?? ''));
@@ -172,72 +172,81 @@ class Instances extends Api_controller
     }
 
     /** @return array{data:array<string,mixed>,errors:array<string,string>} */
-    private function validatePayload(array $input, bool $creating): array
+    private function validatePayload(array $input, bool $creating, array $existing = []): array
     {
         $data = [];
         $errors = [];
-        foreach (['name', 'evolution_instance_name', 'internal_identifier'] as $field) {
-            $value = trim((string) ($input[$field] ?? ''));
-            if ($value === '') {
-                $errors[$field] = 'Campo obrigatorio.';
-                continue;
-            }
+        $provider = strtolower(trim((string) ($input['provider_type'] ?? $existing['provider_type'] ?? 'evolution')));
+        if (!in_array($provider, ['evolution', 'meta_cloud'], true)) {
+            $errors['provider_type'] = 'Selecione Evolution ou WhatsApp Cloud API.';
+            $provider = 'evolution';
+        }
+        $data['provider_type'] = $provider;
+
+        foreach (['name', 'internal_identifier'] as $field) {
+            $value = trim((string) ($input[$field] ?? ($existing[$field] ?? '')));
+            if ($value === '') { $errors[$field] = 'Campo obrigatorio.'; continue; }
             $limit = $field === 'name' ? 150 : 191;
-            if (strlen($value) > $limit || preg_match('/[\x00-\x1F\x7F]/', $value)) {
-                $errors[$field] = 'Valor invalido ou muito longo.';
-                continue;
-            }
-            if ($field === 'internal_identifier' && !preg_match('/^[A-Za-z0-9._-]+$/', $value)) {
-                $errors[$field] = 'Use apenas letras, numeros, ponto, hifen e sublinhado.';
-                continue;
-            }
+            if (strlen($value) > $limit || preg_match('/[\x00-\x1F\x7F]/', $value)) { $errors[$field] = 'Valor invalido ou muito longo.'; continue; }
+            if ($field === 'internal_identifier' && !preg_match('/^[A-Za-z0-9._-]+$/', $value)) { $errors[$field] = 'Use apenas letras, numeros, ponto, hifen e sublinhado.'; continue; }
             $data[$field] = $value;
         }
 
-        // A per-instance target changes where the server sends credentials and
-        // network requests, so it belongs to the stronger settings permission.
-        // Instance managers can still use the globally trusted Evolution URL.
-        if (Chat_permissions::can($this->login_user, Chat_permissions::MANAGE_SETTINGS)) {
-            $baseUrl = trim((string) ($input['base_url'] ?? ''));
-            if ($baseUrl !== '' && !$this->isSafeBaseUrl($baseUrl)) {
-                $errors['base_url'] = 'Informe uma URL HTTP ou HTTPS valida, sem usuario, senha ou fragmento.';
-            } else {
-                $data['base_url'] = $baseUrl;
-            }
+        $evolutionName = trim((string) ($input['evolution_instance_name'] ?? ($existing['evolution_instance_name'] ?? '')));
+        if ($provider === 'evolution') {
+            if ($evolutionName === '') $errors['evolution_instance_name'] = 'Informe o nome exato da instancia Evolution.';
+            elseif (strlen($evolutionName) > 191 || preg_match('/[\x00-\x1F\x7F]/', $evolutionName)) $errors['evolution_instance_name'] = 'Nome tecnico invalido.';
+            else $data['evolution_instance_name'] = $evolutionName;
+        } elseif ($evolutionName !== '') {
+            $data['evolution_instance_name'] = $evolutionName;
         }
 
-        $phoneInput = trim((string) ($input['phone_number'] ?? ''));
-        if ($phoneInput !== '' && !preg_match('/^[0-9+() .-]+$/', $phoneInput)) {
-            $errors['phone_number'] = 'Numero de telefone invalido.';
-        } else {
+        if (Chat_permissions::can($this->login_user, Chat_permissions::MANAGE_SETTINGS)) {
+            $baseUrl = trim((string) ($input['base_url'] ?? ($existing['base_url'] ?? '')));
+            if ($baseUrl !== '' && !$this->isSafeBaseUrl($baseUrl)) $errors['base_url'] = 'Informe uma URL HTTP ou HTTPS valida, sem usuario, senha ou fragmento.';
+            else $data['base_url'] = $baseUrl;
+        }
+
+        $phoneInput = trim((string) ($input['phone_number'] ?? ($existing['phone_number'] ?? '')));
+        if ($phoneInput !== '' && !preg_match('/^[0-9+() .-]+$/', $phoneInput)) $errors['phone_number'] = 'Numero de telefone invalido.';
+        else {
             $phone = (string) preg_replace('/\D+/', '', $phoneInput);
-            if (strlen($phone) > 32) {
-                $errors['phone_number'] = 'Numero de telefone muito longo.';
-            } else {
-                $data['phone_number'] = $phone;
+            if (strlen($phone) > 32) $errors['phone_number'] = 'Numero de telefone muito longo.';
+            else $data['phone_number'] = $phone;
+        }
+
+        if ($provider === 'meta_cloud') {
+            foreach (['meta_phone_number_id' => 'Phone Number ID', 'meta_waba_id' => 'WhatsApp Business Account ID'] as $field => $label) {
+                $value = trim((string) ($input[$field] ?? ($existing[$field] ?? '')));
+                if ($value === '' || !preg_match('/^[0-9]{5,64}$/', $value)) $errors[$field] = $label . ' invalido.';
+                else $data[$field] = $value;
+            }
+            $version = strtolower(trim((string) ($input['meta_graph_version'] ?? ($existing['meta_graph_version'] ?? 'v25.0'))));
+            if (!preg_match('/^v\d{1,2}\.0$/', $version)) $errors['meta_graph_version'] = 'Versao Graph invalida. Exemplo: v25.0.';
+            else $data['meta_graph_version'] = $version;
+            foreach (['meta_access_token'=>'token de acesso','meta_verify_token'=>'token de verificacao','meta_app_secret'=>'App Secret'] as $field=>$label) {
+                $value = trim((string) ($input[$field] ?? ''));
+                $hasKey = 'has_' . $field;
+                $clearKey = 'clear_' . $field;
+                $clear = filter_var($input[$clearKey] ?? false, FILTER_VALIDATE_BOOLEAN);
+                if (strlen($value) > 8192 || preg_match('/[\r\n]/', $value)) $errors[$field] = 'Credencial invalida.';
+                elseif ($value !== '') $data[$field] = $value;
+                if (!$creating) $data[$clearKey] = $clear;
+                if (($creating || empty($existing[$hasKey])) && $value === '' && !$clear) $errors[$field] = 'Informe o ' . $label . '.';
+                if ($clear && $value !== '') $errors[$field] = 'Informe uma nova credencial ou remova a atual; nao use as duas opcoes.';
             }
         }
 
         $apiKey = trim((string) ($input['api_key'] ?? ''));
-        if (strlen($apiKey) > 4096 || preg_match('/[\r\n]/', $apiKey)) {
-            $errors['api_key'] = 'Credencial invalida.';
-        } elseif ($apiKey !== '') {
-            $data['api_key'] = $apiKey;
-        }
+        if (strlen($apiKey) > 4096 || preg_match('/[\r\n]/', $apiKey)) $errors['api_key'] = 'Credencial invalida.';
+        elseif ($apiKey !== '') $data['api_key'] = $apiKey;
         $clearApiKey = filter_var($input['clear_api_key'] ?? false, FILTER_VALIDATE_BOOLEAN);
-        if ($clearApiKey && $apiKey !== '') {
-            $errors['api_key'] = 'Informe uma nova chave ou remova a atual; nao use as duas opcoes ao mesmo tempo.';
-        }
-        if (!$creating) {
-            $data['clear_api_key'] = $clearApiKey;
-        }
+        if ($clearApiKey && $apiKey !== '') $errors['api_key'] = 'Informe uma nova chave ou remova a atual; nao use as duas opcoes.';
+        if (!$creating) $data['clear_api_key'] = $clearApiKey;
 
         $data['active'] = filter_var($input['active'] ?? true, FILTER_VALIDATE_BOOLEAN) ? 1 : 0;
-        if ($creating) {
-            $data['connection_status'] = 'disconnected';
-        }
-
-        return ['data' => $data, 'errors' => $errors];
+        if ($creating) { $data['connection_status'] = 'disconnected'; $data['provider_status'] = 'disconnected'; }
+        return ['data'=>$data,'errors'=>$errors];
     }
 
     private function isSafeBaseUrl(string $url): bool

@@ -34,6 +34,14 @@ class Chat_conversations_model extends Crud_model
         'last_bot_message_at',
         'first_response_at',
         'first_response_seconds',
+        'conversation_type',
+        'group_id',
+        'last_customer_message_at',
+        'service_window_expires_at',
+        'bot_status',
+        'bot_paused_at',
+        'bot_paused_by',
+        'bot_handoff_reason',
     ];
 
     public function __construct()

@@ -27,6 +27,12 @@ class Chat_instances_model extends Crud_model
         'connection_status',
         'active',
         'last_sync_at',
+        'provider_type',
+        'provider_status',
+        'provider_config_json',
+        'meta_phone_number_id',
+        'meta_waba_id',
+        'meta_graph_version',
     ];
 
     public function __construct(?Credential_cipher $credentialCipher = null)
@@ -86,6 +92,18 @@ class Chat_instances_model extends Crud_model
         return $row ? $this->normalizePublicRow($row) : null;
     }
 
+    public function get_by_meta_phone_number_id(string $phoneNumberId): ?array
+    {
+        $phoneNumberId = trim($phoneNumberId);
+        if ($phoneNumberId === '') return null;
+        $row = $this->db->table($this->table)
+            ->select($this->publicSelect(), false)
+            ->where('meta_phone_number_id', $phoneNumberId)
+            ->where('deleted', 0)
+            ->get(1)->getRowArray();
+        return $row ? $this->normalizePublicRow($row) : null;
+    }
+
     public function paginate_instances(array $filters = [], int $page = 1, int $perPage = 25): array
     {
         [$page, $perPage, $offset] = $this->pagination($page, $perPage);
@@ -134,14 +152,27 @@ class Chat_instances_model extends Crud_model
         } elseif (array_key_exists('api_key', $data) && is_string($data['api_key']) && trim($data['api_key']) !== '') {
             $payload['api_key_encrypted'] = $this->credentialCipher->encrypt($data['api_key']);
         }
+        $this->applyProviderSecrets($payload, $data);
 
+        $providerType = strtolower(trim((string) ($payload['provider_type'] ?? $data['provider_type'] ?? 'evolution')));
+        if ($providerType === 'meta_cloud' && trim((string) ($payload['evolution_instance_name'] ?? '')) === '') {
+            // V001 predates multi-provider support and keeps this column NOT NULL.
+            // Store a stable internal alias without exposing it as an Evolution instance.
+            $payload['evolution_instance_name'] = 'meta_' . preg_replace('/[^a-zA-Z0-9_-]+/', '_', $internalIdentifier);
+        }
         $payload = $this->normalizeInstancePayload($payload);
 
         if (!$existing) {
-            foreach (['name', 'evolution_instance_name'] as $requiredField) {
+            foreach (['name'] as $requiredField) {
                 if (!isset($payload[$requiredField]) || trim((string) $payload[$requiredField]) === '') {
                     throw new InvalidArgumentException("Missing required instance field: {$requiredField}.");
                 }
+            }
+            if (($payload['provider_type'] ?? 'evolution') === 'evolution' && trim((string) ($payload['evolution_instance_name'] ?? '')) === '') {
+                throw new InvalidArgumentException('Evolution instance name is required for the Evolution provider.');
+            }
+            if (($payload['provider_type'] ?? 'evolution') === 'meta_cloud' && trim((string) ($payload['meta_phone_number_id'] ?? '')) === '') {
+                throw new InvalidArgumentException('Meta phone number id is required for the official provider.');
             }
         }
 
@@ -182,10 +213,18 @@ class Chat_instances_model extends Crud_model
 
         $payload = $this->normalizeInstancePayload($this->onlyWritable($data));
 
-        foreach (['name', 'evolution_instance_name', 'internal_identifier'] as $requiredField) {
+        foreach (['name', 'internal_identifier'] as $requiredField) {
             if (array_key_exists($requiredField, $payload) && trim((string) $payload[$requiredField]) === '') {
                 throw new InvalidArgumentException("Instance field cannot be empty: {$requiredField}.");
             }
+        }
+        $current = $this->get_by_id($id) ?: [];
+        $effectiveProvider = strtolower(trim((string) ($payload['provider_type'] ?? $current['provider_type'] ?? 'evolution')));
+        if ($effectiveProvider === 'evolution' && array_key_exists('evolution_instance_name', $payload) && trim((string) $payload['evolution_instance_name']) === '') {
+            throw new InvalidArgumentException('Evolution instance name cannot be empty.');
+        }
+        if ($effectiveProvider === 'meta_cloud' && array_key_exists('evolution_instance_name', $payload) && trim((string) $payload['evolution_instance_name']) === '') {
+            unset($payload['evolution_instance_name']);
         }
 
         if (!empty($data['clear_api_key'])) {
@@ -193,6 +232,7 @@ class Chat_instances_model extends Crud_model
         } elseif (array_key_exists('api_key', $data) && is_string($data['api_key']) && trim($data['api_key']) !== '') {
             $payload['api_key_encrypted'] = $this->credentialCipher->encrypt($data['api_key']);
         }
+        $this->applyProviderSecrets($payload, $data);
 
         if ($payload === []) {
             return true;
@@ -221,6 +261,23 @@ class Chat_instances_model extends Crud_model
         }
 
         return $this->credentialCipher->decrypt($storedValue);
+    }
+
+    /** @return array{access_token:?string,verify_token:?string,app_secret:?string} */
+    public function get_decrypted_meta_credentials(int $id): array
+    {
+        $row = $this->db->table($this->table)
+            ->select('meta_access_token_encrypted,meta_verify_token_encrypted,meta_app_secret_encrypted')
+            ->where('id', $id)->where('deleted', 0)->get(1)->getRowArray();
+        $decrypt = function ($value): ?string {
+            if (!is_string($value) || $value === '') return null;
+            return $this->credentialCipher->decrypt($value);
+        };
+        return [
+            'access_token' => $decrypt($row['meta_access_token_encrypted'] ?? null),
+            'verify_token' => $decrypt($row['meta_verify_token_encrypted'] ?? null),
+            'app_secret' => $decrypt($row['meta_app_secret_encrypted'] ?? null),
+        ];
     }
 
     public function clear_api_key(int $id): bool
@@ -255,6 +312,7 @@ class Chat_instances_model extends Crud_model
             ->where('deleted', 0)
             ->update([
                 'connection_status' => $status,
+                'provider_status' => $status,
                 'last_sync_at' => $lastSyncAt ?? gmdate('Y-m-d H:i:s'),
                 'updated_at' => gmdate('Y-m-d H:i:s'),
             ]);
@@ -281,14 +339,42 @@ class Chat_instances_model extends Crud_model
 
     private function publicSelect(): string
     {
-        return "id, name, evolution_instance_name, internal_identifier, base_url, phone_number, connection_status, active, last_sync_at, created_at, updated_at, CASE WHEN api_key_encrypted IS NOT NULL AND api_key_encrypted <> '' THEN 1 ELSE 0 END AS has_api_key";
+        return "id, name, evolution_instance_name, internal_identifier, base_url, phone_number, connection_status, provider_type, provider_status, provider_config_json, meta_phone_number_id, meta_waba_id, meta_graph_version, active, last_sync_at, created_at, updated_at, CASE WHEN api_key_encrypted IS NOT NULL AND api_key_encrypted <> '' THEN 1 ELSE 0 END AS has_api_key, CASE WHEN meta_access_token_encrypted IS NOT NULL AND meta_access_token_encrypted <> '' THEN 1 ELSE 0 END AS has_meta_access_token, CASE WHEN meta_verify_token_encrypted IS NOT NULL AND meta_verify_token_encrypted <> '' THEN 1 ELSE 0 END AS has_meta_verify_token, CASE WHEN meta_app_secret_encrypted IS NOT NULL AND meta_app_secret_encrypted <> '' THEN 1 ELSE 0 END AS has_meta_app_secret";
     }
 
     private function normalizePublicRow(array $row): array
     {
         $row['has_api_key'] = (bool) ($row['has_api_key'] ?? false);
+        $row['has_meta_access_token'] = (bool) ($row['has_meta_access_token'] ?? false);
+        $row['has_meta_verify_token'] = (bool) ($row['has_meta_verify_token'] ?? false);
+        $row['has_meta_app_secret'] = (bool) ($row['has_meta_app_secret'] ?? false);
+        $row['provider_type'] = in_array((string) ($row['provider_type'] ?? ''), ['evolution', 'meta_cloud'], true) ? (string) $row['provider_type'] : 'evolution';
+        if (is_string($row['provider_config_json'] ?? null) && trim((string) $row['provider_config_json']) !== '') {
+            $decoded = json_decode((string) $row['provider_config_json'], true);
+            $row['provider_config'] = is_array($decoded) ? $decoded : [];
+        } else {
+            $row['provider_config'] = [];
+        }
+        unset($row['provider_config_json']);
 
         return $row;
+    }
+
+    private function applyProviderSecrets(array &$payload, array $data): void
+    {
+        $map = [
+            'meta_access_token' => 'meta_access_token_encrypted',
+            'meta_verify_token' => 'meta_verify_token_encrypted',
+            'meta_app_secret' => 'meta_app_secret_encrypted',
+        ];
+        foreach ($map as $input => $column) {
+            $clearKey = 'clear_' . $input;
+            if (!empty($data[$clearKey])) {
+                $payload[$column] = null;
+            } elseif (array_key_exists($input, $data) && is_string($data[$input]) && trim($data[$input]) !== '') {
+                $payload[$column] = $this->credentialCipher->encrypt(trim($data[$input]));
+            }
+        }
     }
 
     private function normalizeInstancePayload(array $payload): array
@@ -296,6 +382,21 @@ class Chat_instances_model extends Crud_model
         if (array_key_exists('base_url', $payload)) {
             $baseUrl = is_string($payload['base_url']) ? trim($payload['base_url']) : $payload['base_url'];
             $payload['base_url'] = $baseUrl === '' ? null : $baseUrl;
+        }
+        if (array_key_exists('provider_type', $payload)) {
+            $provider = strtolower(trim((string) $payload['provider_type']));
+            if (!in_array($provider, ['evolution', 'meta_cloud'], true)) {
+                throw new InvalidArgumentException('Unsupported WhatsApp provider.');
+            }
+            $payload['provider_type'] = $provider;
+        }
+        if (array_key_exists('meta_graph_version', $payload)) {
+            $version = strtolower(trim((string) $payload['meta_graph_version']));
+            if (!preg_match('/^v\d{1,2}\.0$/', $version)) throw new InvalidArgumentException('Invalid Meta Graph API version.');
+            $payload['meta_graph_version'] = $version;
+        }
+        if (isset($payload['provider_config_json']) && is_array($payload['provider_config_json'])) {
+            $payload['provider_config_json'] = json_encode($payload['provider_config_json'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         }
 
         return $payload;

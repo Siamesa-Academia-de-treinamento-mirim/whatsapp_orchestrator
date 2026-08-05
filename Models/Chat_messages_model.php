@@ -36,6 +36,13 @@ class Chat_messages_model extends Crud_model
         'is_internal_note',
         'delivery_error',
         'failed_at',
+        'sender_jid',
+        'sender_phone',
+        'sender_name',
+        'sender_contact_id',
+        'is_group_message',
+        'provider_name',
+        'provider_payload_id',
     ];
 
     public function __construct()

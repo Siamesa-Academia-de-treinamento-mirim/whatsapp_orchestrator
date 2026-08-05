@@ -8,9 +8,10 @@ $visibleContacts = count($contacts);
     <div class="impulso-section-heading">
         <div>
             <h2>Contatos</h2>
-            <p>Pesquise, organize e atualize os contatos vinculados às conversas da Evolution.</p>
+            <p>Pesquise e organize contatos de canais Evolution e WhatsApp Cloud API.</p>
         </div>
         <div class="impulso-section-actions">
+            <button class="btn btn-default" type="button" data-impulso-action="repair-contact-names"><i data-feather="user-check"></i> Corrigir nomes</button>
             <button class="btn btn-default" type="button" data-impulso-action="import-contacts"><i data-feather="upload"></i> Importar</button>
             <button class="btn btn-primary" type="button" data-impulso-action="new-contact"><i data-feather="user-plus"></i> Novo contato</button>
         </div>
@@ -25,7 +26,7 @@ $visibleContacts = count($contacts);
 
     <div class="impulso-card">
         <div class="impulso-card-header impulso-card-header-wrap">
-            <div><h3>Todos os contatos</h3><p>Dados sincronizados e enriquecidos pelo Rise/n8n</p></div>
+            <div><h3>Todos os contatos</h3><p>Identidade consolidada por número, JID e origem do nome</p></div>
             <div class="impulso-filter-row impulso-gap-8">
                 <div class="impulso-search" style="width:280px;max-width:45vw;"><i data-feather="search"></i><input id="impulso-contact-search" type="search" placeholder="Nome, telefone, e-mail ou empresa"></div>
                 <select class="form-control" id="impulso-contact-instance-filter" style="width:180px;">

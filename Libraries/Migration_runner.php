@@ -7,6 +7,12 @@ namespace Chatwoot_plugin\Libraries;
 use Chatwoot_plugin\Database\Migrations\V001_Create_chat_tables;
 use Chatwoot_plugin\Database\Migrations\V002_Create_operational_domain;
 use Chatwoot_plugin\Database\Migrations\V003_Backfill_conversation_contacts;
+use Chatwoot_plugin\Database\Migrations\V004_Add_channels_groups_and_bots;
+use Chatwoot_plugin\Database\Migrations\V005_Internal_campaign_dispatch;
+use Chatwoot_plugin\Database\Migrations\V006_Bot_versions_and_campaign_runs;
+use Chatwoot_plugin\Database\Migrations\V007_Campaign_run_recipients;
+use Chatwoot_plugin\Database\Migrations\V008_Migrate_legacy_campaign_dispatch;
+use Chatwoot_plugin\Database\Migrations\V009_Retire_legacy_ai_reports_and_n8n;
 use CodeIgniter\Database\BaseConnection;
 use Config\Database;
 use RuntimeException;
@@ -15,6 +21,12 @@ use Throwable;
 require_once dirname(__DIR__) . '/Database/Migrations/V001_Create_chat_tables.php';
 require_once dirname(__DIR__) . '/Database/Migrations/V002_Create_operational_domain.php';
 require_once dirname(__DIR__) . '/Database/Migrations/V003_Backfill_conversation_contacts.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V004_Add_channels_groups_and_bots.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V005_Internal_campaign_dispatch.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V006_Bot_versions_and_campaign_runs.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V007_Campaign_run_recipients.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V008_Migrate_legacy_campaign_dispatch.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V009_Retire_legacy_ai_reports_and_n8n.php';
 
 /**
  * Small plugin-owned migration runner.
@@ -56,6 +68,12 @@ class Migration_runner
                 V001_Create_chat_tables::VERSION => V001_Create_chat_tables::class,
                 V002_Create_operational_domain::VERSION => V002_Create_operational_domain::class,
                 V003_Backfill_conversation_contacts::VERSION => V003_Backfill_conversation_contacts::class,
+                V004_Add_channels_groups_and_bots::VERSION => V004_Add_channels_groups_and_bots::class,
+                V005_Internal_campaign_dispatch::VERSION => V005_Internal_campaign_dispatch::class,
+                V006_Bot_versions_and_campaign_runs::VERSION => V006_Bot_versions_and_campaign_runs::class,
+                V007_Campaign_run_recipients::VERSION => V007_Campaign_run_recipients::class,
+                V008_Migrate_legacy_campaign_dispatch::VERSION => V008_Migrate_legacy_campaign_dispatch::class,
+                V009_Retire_legacy_ai_reports_and_n8n::VERSION => V009_Retire_legacy_ai_reports_and_n8n::class,
             ];
 
             ksort($migrations, SORT_NUMERIC);

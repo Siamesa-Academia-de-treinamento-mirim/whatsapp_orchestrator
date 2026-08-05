@@ -60,8 +60,11 @@
         messageLoading: false,
         messageRequestSequence: 0,
         messageRequestContext: '',
-        sending: false,
-        syncedChannels: {},
+        pendingSends: {},
+        sendChain: Promise.resolve(),
+        channelSyncAt: {},
+        historySyncAt: {},
+        historySyncing: {},
         pollingInstanceIndex: 0,
         pollingChannelSyncing: false,
         pollingTimer: null,
@@ -241,7 +244,15 @@
             unread_count: Number(item.unread_count || 0),
             messages_today: Number(item.messages_today || 0),
             last_sync_at: item.last_sync_at || null,
-            has_api_key: !!item.has_api_key
+            has_api_key: !!item.has_api_key,
+            provider_type: String(item.provider_type || 'evolution'),
+            provider_status: String(item.provider_status || item.connection_status || 'disconnected'),
+            meta_phone_number_id: String(item.meta_phone_number_id || ''),
+            meta_waba_id: String(item.meta_waba_id || ''),
+            meta_graph_version: String(item.meta_graph_version || 'v25.0'),
+            has_meta_access_token: !!item.has_meta_access_token,
+            has_meta_verify_token: !!item.has_meta_verify_token,
+            has_meta_app_secret: !!item.has_meta_app_secret
         };
     }
 
@@ -265,8 +276,11 @@
             contact_id: Number(item.contact_id || contact.id || 0) || null,
             priority: String(item.priority || 'normal'),
             assignee_id: Number(item.assignee_id || 0) || null,
-            ai_status: String(item.ai_status || 'running'),
-            ai_summary: String(item.ai_summary || ''),
+            conversation_type: String(item.conversation_type || 'individual'),
+            group_id: Number(item.group_id || 0) || null,
+            provider_type: String(item.provider_type || instance.provider_type || 'evolution'),
+            service_window_expires_at: item.service_window_expires_at || null,
+            bot_status: String(item.bot_status || 'active'),
             unread: Number(item.unread || item.unread_count || 0),
             last_message: String(item.last_message || item.last_message_preview || ''),
             last_activity_at: item.last_activity_at || item.last_message_at || null,
@@ -304,6 +318,12 @@
             file_size: Number(item.file_size || 0),
             media_id: Number(item.media_id || 0) || null,
             sender_user_id: Number(item.sender_user_id || 0) || null,
+            sender_jid: String(item.sender_jid || ''),
+            sender_phone: String(item.sender_phone || ''),
+            sender_name: String(item.sender_name || ''),
+            sender_contact_id: Number(item.sender_contact_id || 0) || null,
+            is_group_message: !!item.is_group_message,
+            provider_name: String(item.provider_name || ''),
             is_internal_note: !!item.is_internal_note || String(item.message_type || '') === 'note',
             delivery_error: String(item.delivery_error || ''),
             status: String(item.status || 'received').toLowerCase(),
@@ -457,33 +477,11 @@
         var requestedLimit = reset && silent
             ? pageSize * Math.min(maxSilentPages, loadedPageCount)
             : pageSize;
-        var syncKey = String(filters.channelId);
-        var syncRemote = !!(reset && !silent && !state.syncedChannels[syncKey]);
         var list = document.getElementById('impulso-conversation-list');
         if (!silent && reset && list) {
             list.innerHTML = '<div class="impulso-conversation-empty"><div class="spinner-border spinner-border-sm" role="status"></div><strong>Carregando conversas</strong><span>Consultando dados do atendimento.</span></div>';
         }
-        var remoteSync = Promise.resolve();
-        if (syncRemote) {
-            var syncBody = {};
-            if (filters.channelId !== 'all') syncBody.instance_id = Number(filters.channelId);
-            remoteSync = api(endpoint('conversations').replace(/\/$/, '') + '/sync', {
-                method: 'POST',
-                body: syncBody
-            }).then(function (payload) {
-                var syncResult = payload && payload.data ? payload.data : {};
-                if (Number(syncResult.errors || 0) > 0) {
-                    if (!silent) showToast('Sincronização parcial', 'Um ou mais canais não puderam ser atualizados; os dados locais foram mantidos.', 'alert-triangle');
-                } else {
-                    state.syncedChannels[syncKey] = true;
-                }
-            }).catch(function (error) {
-                if (!silent) showToast('Sincronização indisponível', error.message + ' Exibindo os dados locais.', 'alert-triangle');
-            });
-        }
-        return remoteSync.then(function () {
-            return api(endpoint('conversations') + '?' + conversationQuery(requestedPage, requestedLimit, filters));
-        }).then(function (payload) {
+        return api(endpoint('conversations') + '?' + conversationQuery(requestedPage, requestedLimit, filters)).then(function (payload) {
             if (requestId !== state.listRequestSequence || requestContext !== conversationContext()) return;
             var rows = Array.isArray(payload.data) ? payload.data.map(normalizeConversation) : [];
             if (reset) {
@@ -553,7 +551,7 @@
         setText('impulso-current-channel', label || (selectedInstance() ? selectedInstance().name : 'Todos os canais'));
         renderChannels();
         state.activeConversationId = null;
-        loadConversations(true);
+        loadConversations(true).then(function () { return syncPollingChannel(true); });
     }
 
     function bindChannelButtons() {
@@ -599,9 +597,50 @@
         setText('impulso-contact-city', conversation.city);
         setText('impulso-contact-source', conversation.source);
         setText('impulso-contact-created', conversation.created_at ? new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' }).format(dateValue(conversation.created_at)) : 'Não informado');
+        setText('impulso-contact-phone', conversation.conversation_type === 'group' ? 'Grupo WhatsApp' : conversation.phone);
+        setText('impulso-bot-conversation-state', conversation.bot_status === 'active' ? 'Ativo até um atendente responder' : (conversation.bot_status === 'handoff' ? 'Encaminhado para humano' : 'Pausado'));
+        var botButton = document.querySelector('[data-impulso-action="toggle-conversation-bot"]');
+        if (botButton) botButton.textContent = conversation.bot_status === 'active' ? 'Pausar' : 'Retomar';
         var tags = document.getElementById('impulso-contact-tags');
         if (tags) tags.innerHTML = conversation.tags.map(function (tag) { return '<span class="impulso-badge primary">' + escapeHtml(tag) + '</span>'; }).join('');
+        loadGroupDetails(conversation);
         updateComposerState();
+    }
+
+    function loadGroupDetails(conversation) {
+        var section = document.getElementById('impulso-group-section');
+        var list = document.getElementById('impulso-group-participants');
+        var count = document.getElementById('impulso-group-participant-count');
+        if (!section || !list || !count) return;
+        var isGroup = conversation && conversation.conversation_type === 'group';
+        section.classList.toggle('impulso-hidden', !isGroup);
+        if (!isGroup) {
+            list.innerHTML = '';
+            count.textContent = '0';
+            return;
+        }
+        var conversationId = Number(conversation.id || 0);
+        list.innerHTML = '<small>Carregando participantes...</small>';
+        api(endpointWithId('conversations', conversationId, '/group')).then(function (payload) {
+            if (Number(state.activeConversationId) !== conversationId) return;
+            var group = payload && payload.data ? payload.data : {};
+            var participants = Array.isArray(group.participants) ? group.participants : [];
+            count.textContent = String(Number(group.participant_count || participants.length));
+            if (!participants.length) {
+                list.innerHTML = '<small>Os participantes serão identificados conforme enviarem mensagens.</small>';
+                return;
+            }
+            list.innerHTML = '<ul class="impulso-list">' + participants.map(function (participant) {
+                var name = participant.name || participant.phone || participant.jid || 'Participante';
+                var details = participant.is_self ? 'Este número' : (participant.role === 'admin' ? 'Administrador' : (participant.phone || 'Número não resolvido'));
+                return '<li class="impulso-list-item"><div class="impulso-avatar sm">' + escapeHtml(initials(name, participant.phone || '')) + '</div><div class="impulso-list-copy"><strong>' + escapeHtml(name) + '</strong><span>' + escapeHtml(details) + '</span></div></li>';
+            }).join('') + '</ul>';
+            replaceIcons();
+        }).catch(function () {
+            if (Number(state.activeConversationId) !== conversationId) return;
+            count.textContent = '0';
+            list.innerHTML = '<small>Participantes ainda não sincronizados.</small>';
+        });
     }
 
     function selectConversation(id, silent) {
@@ -619,7 +658,9 @@
             item.classList.toggle('active', Number(item.getAttribute('data-conversation-id')) === Number(id));
         });
         applyActiveConversation(conversation);
-        loadMessages('reset', !silent);
+        loadMessages('reset', !silent).then(function () {
+            return syncConversationHistory(conversation.id, false);
+        });
         markConversationRead(conversation);
         var sidebar = document.getElementById('impulso-chat-sidebar');
         if (sidebar && window.innerWidth <= 840) sidebar.classList.remove('open');
@@ -726,7 +767,9 @@
     function messageHtml(message) {
         var direction = message.direction === 'outgoing' ? 'outgoing' : message.direction === 'internal' ? 'internal' : 'incoming';
         var retry = canSendMessages() && message.status === 'failed' && message.client_message_id ? '<button class="impulso-message-retry" type="button" data-retry-message="' + escapeHtml(message.client_message_id) + '">Tentar novamente</button>' : '';
-        return '<div class="impulso-message-row ' + direction + (message.is_internal_note ? ' is-note' : '') + (message.status === 'failed' ? ' is-failed' : '') + '" data-message-id="' + escapeHtml(message.id || message.external_message_id || '') + '" data-message-search="' + escapeHtml(String(message.text_content || '').toLowerCase()) + '"><div class="impulso-message">' + mediaHtml(message) +
+        var author = message.direction === 'incoming' && message.is_group_message ? (message.sender_name || message.sender_phone || 'Participante') : '';
+        return '<div class="impulso-message-row ' + direction + (message.is_internal_note ? ' is-note' : '') + (message.status === 'failed' ? ' is-failed' : '') + '" data-message-id="' + escapeHtml(message.id || message.external_message_id || '') + '" data-message-search="' + escapeHtml(String((author ? author + ' ' : '') + (message.text_content || '')).toLowerCase()) + '"><div class="impulso-message">' +
+            (author ? '<strong class="impulso-message-author">' + escapeHtml(author) + '</strong>' : '') + mediaHtml(message) +
             (message.text_content ? '<p>' + escapeHtml(message.text_content).replace(/\n/g, '<br>') + '</p>' : '') + retry +
             '<div class="impulso-message-footer"><span>' + escapeHtml(messageTime(message.sent_at)) + '</span>' + statusIcon(message) + '</div></div></div>';
     }
@@ -785,15 +828,8 @@
         var body = document.getElementById('impulso-chat-body');
         if (showLoading && mode === 'reset' && body) body.innerHTML = '<div class="impulso-empty"><div class="spinner-border spinner-border-sm" role="status"></div><p>Carregando histórico...</p></div>';
         var requestedConversationId = conversation.id;
-        var messageUrl = endpointWithId('conversations', conversation.id, '/messages');
-        var requestOptions = {};
-        if (mode === 'reset' || mode === 'refresh') {
-            messageUrl += '/sync';
-            requestOptions = { method: 'POST', body: { limit: Number(config.messagePageSize || 50) } };
-        } else {
-            messageUrl += '?' + params.toString();
-        }
-        return api(messageUrl, requestOptions).then(function (payload) {
+        var messageUrl = endpointWithId('conversations', conversation.id, '/messages') + '?' + params.toString();
+        return api(messageUrl).then(function (payload) {
             if (requestId !== state.messageRequestSequence || Number(state.activeConversationId) !== Number(requestedConversationId)) return;
             if (mode === 'reset' && payload.meta && payload.meta.sync_error) {
                 showToast('Histórico local', payload.meta.sync_error, 'alert-triangle');
@@ -849,7 +885,7 @@
         var input = document.getElementById('impulso-message-input');
         var button = document.getElementById('impulso-send-message');
         var canSend = canSendMessages();
-        var disabled = !canSend || !conversation || conversation.instance_status !== 'connected' || state.sending;
+        var disabled = !canSend || !conversation || conversation.instance_status !== 'connected';
         if (input) input.disabled = disabled;
         if (button) button.disabled = disabled;
         var hint = document.getElementById('impulso-composer-hint');
@@ -858,7 +894,7 @@
 
     function sendMessage(text, clientId, existing) {
         var conversation = activeConversation();
-        if (!conversation || state.sending) return;
+        if (!conversation) return;
         if (!canSendMessages()) {
             showToast('Envio não permitido', 'Seu perfil não possui permissão para enviar mensagens.', 'shield');
             return;
@@ -874,6 +910,7 @@
         }
         var input = document.getElementById('impulso-message-input');
         clientId = clientId || createClientMessageId();
+        if (state.pendingSends[clientId]) return;
         var optimistic = existing || normalizeMessage({
             id: clientId,
             client_message_id: clientId,
@@ -888,13 +925,15 @@
         optimistic.status = 'sending';
         if (!existing) state.messages.push(optimistic);
         if (input) input.value = '';
-        state.sending = true;
+        state.pendingSends[clientId] = true;
         updateComposerState();
         renderMessages({ forceBottom: true });
         var requestedConversationId = conversation.id;
-        api(endpointWithId('conversations', conversation.id, '/messages'), {
-            method: 'POST',
-            body: { text: text, client_message_id: clientId }
+        state.sendChain = state.sendChain.then(function () {
+            return api(endpointWithId('conversations', conversation.id, '/messages'), {
+                method: 'POST',
+                body: { text: text, client_message_id: clientId }
+            });
         }).then(function (payload) {
             var real = normalizeMessage(payload.data || {});
             conversation.last_message = real.text_content;
@@ -912,7 +951,7 @@
             renderMessages({ forceBottom: true });
             showToast('Falha no envio', error.message, 'alert-triangle');
         }).finally(function () {
-            state.sending = false;
+            delete state.pendingSends[clientId];
             updateComposerState();
             if (input) input.focus();
         });
@@ -923,7 +962,37 @@
         if (message) sendMessage(message.text_content, clientId, message);
     }
 
-    function syncPollingChannel() {
+    function remoteSyncInterval() {
+        return Math.max(30000, Math.min(300000, Number(config.remoteSyncIntervalMs || 30000)));
+    }
+
+    function syncConversationHistory(conversationId, force) {
+        conversationId = Number(conversationId || 0);
+        if (conversationId < 1 || runtime.destroyed || !endpoint('conversations')) return Promise.resolve();
+        var key = String(conversationId);
+        var now = Date.now();
+        if (state.historySyncing[key]) return Promise.resolve();
+        if (!force && now - Number(state.historySyncAt[key] || 0) < remoteSyncInterval()) return Promise.resolve();
+
+        state.historySyncing[key] = true;
+        state.historySyncAt[key] = now;
+        return api(endpointWithId('conversations', conversationId, '/messages/sync'), {
+            method: 'POST',
+            body: { limit: Math.min(100, Math.max(10, Number(config.messagePageSize || 50))) }
+        }).then(function (payload) {
+            if (Number(state.activeConversationId) !== conversationId) return;
+            var rows = Array.isArray(payload.data) ? payload.data.map(normalizeMessage) : [];
+            state.hasMoreBefore = !!(payload.meta && payload.meta.has_more_before);
+            mergeMessages(rows, false);
+            renderMessages({ forceBottom: false });
+        }).catch(function () {
+            /* Webhooks and the local cursor remain the primary real-time path. */
+        }).finally(function () {
+            delete state.historySyncing[key];
+        });
+    }
+
+    function syncPollingChannel(force) {
         if (state.pollingChannelSyncing || !endpoint('conversations')) return Promise.resolve();
         var candidates = state.instances.filter(function (instance) {
             return instance.active && instance.status === 'connected';
@@ -935,11 +1004,20 @@
         }
         if (!candidates.length) return Promise.resolve();
         var instance = candidates[state.pollingInstanceIndex % candidates.length];
+        var syncKey = String(instance.id);
+        var now = Date.now();
+        if (!force && now - Number(state.channelSyncAt[syncKey] || 0) < remoteSyncInterval()) return Promise.resolve();
         state.pollingInstanceIndex = (state.pollingInstanceIndex + 1) % candidates.length;
         state.pollingChannelSyncing = true;
+        state.channelSyncAt[syncKey] = now;
         return api(endpoint('conversations').replace(/\/$/, '') + '/sync', {
             method: 'POST',
-            body: { instance_id: Number(instance.id) }
+            body: {
+                instance_id: Number(instance.id),
+                limit: Math.min(100, Math.max(10, Number(config.remoteConversationSyncLimit || 100)))
+            }
+        }).then(function () {
+            return loadConversations(true, true);
         }).catch(function () {
             /* A leitura local continua disponivel; o proximo ciclo tenta novamente. */
         }).finally(function () {
@@ -952,11 +1030,12 @@
         if (!document.hidden && app.getAttribute('data-active-tab') === 'conversations') {
             loadInstances(true);
             var refresh = state.activeConversationId
-                ? loadMessages('refresh', false)
+                ? loadMessages('after', false)
                 : Promise.resolve();
             refresh
-                .then(syncPollingChannel)
-                .then(function () { return loadConversations(true, true); });
+                .then(function () { return loadConversations(true, true); })
+                .then(function () { return syncConversationHistory(state.activeConversationId, false); })
+                .then(function () { return syncPollingChannel(false); });
         }
         schedulePoll();
     }
@@ -1017,51 +1096,185 @@
         if (element) element.value = value == null ? '' : String(value);
     }
 
+    function updateInstanceProviderSections() {
+        var provider = fieldValue('impulso-instance-provider') || 'evolution';
+        document.querySelectorAll('[data-instance-provider-section]').forEach(function (section) {
+            section.classList.toggle('impulso-hidden', section.getAttribute('data-instance-provider-section') !== provider);
+        });
+    }
+
     function openInstanceModal(id) {
         var instance = state.instances.find(function (item) { return Number(item.id) === Number(id); }) || null;
+        var provider = instance ? (instance.provider_type || 'evolution') : 'evolution';
         setField('impulso-instance-id', instance ? instance.id : '');
+        setField('impulso-instance-provider', provider);
         setField('impulso-instance-name', instance ? instance.name : '');
-        setField('impulso-instance-technical-name', instance ? instance.evolution_instance_name : '');
+        setField('impulso-instance-technical-name', instance && provider === 'evolution' ? instance.evolution_instance_name : '');
         setField('impulso-instance-identifier', instance ? instance.internal_identifier : '');
         setField('impulso-instance-base-url', instance ? instance.base_url : '');
-        setField('impulso-instance-phone', instance ? instance.phone : '');
+        setField('impulso-instance-phone', instance ? (instance.phone || instance.phone_number || '') : '');
         setField('impulso-instance-api-key', '');
+        setField('impulso-instance-meta-phone-id', instance ? instance.meta_phone_number_id : '');
+        setField('impulso-instance-meta-waba-id', instance ? instance.meta_waba_id : '');
+        setField('impulso-instance-meta-version', instance ? (instance.meta_graph_version || 'v25.0') : 'v25.0');
+        setField('impulso-instance-meta-access-token', '');
+        setField('impulso-instance-meta-verify-token', '');
+        setField('impulso-instance-meta-app-secret', '');
         var clearApiKey = document.getElementById('impulso-instance-clear-api-key');
-        if (clearApiKey) {
-            clearApiKey.checked = false;
-            clearApiKey.disabled = !instance || !instance.has_api_key;
-        }
+        if (clearApiKey) { clearApiKey.checked = false; clearApiKey.disabled = !instance || !instance.has_api_key; }
         var active = document.getElementById('impulso-instance-active');
         if (active) active.checked = instance ? instance.active : true;
-        setText('impulso-instance-modal-title', instance ? 'Editar instância Evolution' : 'Nova instância Evolution');
+        updateInstanceProviderSections();
+        setText('impulso-instance-modal-title', instance ? 'Editar canal WhatsApp' : 'Novo canal WhatsApp');
         var modal = document.getElementById('impulso-instance-modal');
         if (modal && window.bootstrap && window.bootstrap.Modal) window.bootstrap.Modal.getOrCreateInstance(modal).show();
     }
 
     function saveInstance(button) {
         var id = Number(fieldValue('impulso-instance-id') || 0);
+        var provider = fieldValue('impulso-instance-provider') || 'evolution';
         var active = document.getElementById('impulso-instance-active');
         var clearApiKey = document.getElementById('impulso-instance-clear-api-key');
         var body = {
+            provider_type: provider,
             name: fieldValue('impulso-instance-name'),
             evolution_instance_name: fieldValue('impulso-instance-technical-name'),
             internal_identifier: fieldValue('impulso-instance-identifier'),
             phone_number: fieldValue('impulso-instance-phone'),
-            api_key: fieldValue('impulso-instance-api-key'),
-            clear_api_key: clearApiKey && clearApiKey.checked ? 1 : 0,
             active: active && active.checked ? 1 : 0
         };
-        if (config.permissions && config.permissions.manageSettings) {
-            body.base_url = fieldValue('impulso-instance-base-url');
+        if (provider === 'evolution') {
+            body.api_key = fieldValue('impulso-instance-api-key');
+            body.clear_api_key = clearApiKey && clearApiKey.checked ? 1 : 0;
+            if (config.permissions && config.permissions.manageSettings) body.base_url = fieldValue('impulso-instance-base-url');
+        } else {
+            body.meta_phone_number_id = fieldValue('impulso-instance-meta-phone-id');
+            body.meta_waba_id = fieldValue('impulso-instance-meta-waba-id');
+            body.meta_graph_version = fieldValue('impulso-instance-meta-version') || 'v25.0';
+            body.meta_access_token = fieldValue('impulso-instance-meta-access-token');
+            body.meta_verify_token = fieldValue('impulso-instance-meta-verify-token');
+            body.meta_app_secret = fieldValue('impulso-instance-meta-app-secret');
         }
         button.disabled = true;
         api(id ? endpointWithId('instances', id) : endpoint('instances'), { method: 'POST', body: body }).then(function () {
             closeModal(button);
-            showToast('Instância salva', 'A configuração foi armazenada com segurança.', 'check-circle');
+            showToast('Canal salvo', 'A configuração foi armazenada com segurança.', 'check-circle');
             return refreshInstancesSurface();
         }).catch(function (error) {
             showToast('Falha ao salvar', error.message, 'alert-triangle');
         }).finally(function () { button.disabled = false; });
+    }
+
+    function defaultBotDefinition() {
+        return {
+            start: 'inicio',
+            nodes: {
+                inicio: {
+                    message: 'Olá. Posso ajudar com valores, horários, endereço ou agendamento. Digite uma dessas opções.',
+                    transitions: [
+                        { id: 'valores', target: 'valores', match: { type: 'any_word', values: ['valor', 'valores', 'preço', 'mensalidade'] } },
+                        { id: 'horarios', target: 'horarios', match: { type: 'any_word', values: ['horário', 'horarios', 'turma'] } },
+                        { id: 'endereco', target: 'endereco', match: { type: 'any_word', values: ['endereço', 'localização', 'onde'] } },
+                        { id: 'agendar', target: '__handoff__', match: { type: 'any_word', values: ['agendar', 'visita', 'matrícula'] } }
+                    ],
+                    terminal: false,
+                    handoff: false,
+                    fallback_target: null
+                },
+                valores: { message: 'A mensalidade e demais valores são confirmados pelo responsável. Vou encaminhar seu atendimento.', transitions: [], terminal: true, handoff: true, fallback_target: null },
+                horarios: { message: 'Temos turmas aos sábados. Para confirmar a vaga e o horário correto, vou encaminhar ao responsável.', transitions: [], terminal: true, handoff: true, fallback_target: null },
+                endereco: { message: 'Nossa equipe confirma o endereço da unidade correspondente ao seu cadastro. Vou encaminhar seu atendimento.', transitions: [], terminal: true, handoff: true, fallback_target: null }
+            }
+        };
+    }
+
+    function botDefinitionFromField() {
+        var raw = fieldValue('impulso-bot-definition');
+        try { return JSON.parse(raw); } catch (error) { throw new Error('O fluxo JSON é inválido: ' + error.message); }
+    }
+
+    function openBotModal(id) {
+        var reset = function (bot) {
+            setField('impulso-bot-id', bot ? bot.id : '');
+            setField('impulso-bot-name', bot ? bot.name : 'Atendimento inicial');
+            setField('impulso-bot-instance', bot && bot.instance_id ? bot.instance_id : '');
+            setField('impulso-bot-description', bot ? bot.description : 'Responde somente dúvidas previstas e transfere o restante para um responsável.');
+            setField('impulso-bot-trigger', bot ? bot.trigger_type : 'first_message');
+            setField('impulso-bot-trigger-values', bot && bot.trigger_config && Array.isArray(bot.trigger_config.values) ? bot.trigger_config.values.join(', ') : '');
+            setField('impulso-bot-max-fallbacks', bot ? bot.max_fallbacks : 2);
+            setField('impulso-bot-fallback', bot ? bot.fallback_message : 'Não consegui identificar sua dúvida com segurança.');
+            setField('impulso-bot-handoff', bot ? bot.handoff_message : 'Vou encaminhar sua mensagem para um responsável continuar o atendimento.');
+            setField('impulso-bot-definition', JSON.stringify(bot ? bot.definition : defaultBotDefinition(), null, 2));
+            setField('impulso-bot-simulation-inputs', 'oi\nqual o valor?');
+            var ignoreGroups = document.getElementById('impulso-bot-ignore-groups');
+            if (ignoreGroups) ignoreGroups.checked = bot ? !!bot.ignore_groups : true;
+            var result = document.getElementById('impulso-bot-simulation-result');
+            if (result) { result.textContent = ''; result.classList.add('impulso-hidden'); }
+            setText('impulso-bot-modal-title', bot ? 'Editar bot determinístico' : 'Novo bot determinístico');
+            var modal = document.getElementById('impulso-bot-modal');
+            if (modal && window.bootstrap && window.bootstrap.Modal) window.bootstrap.Modal.getOrCreateInstance(modal).show();
+        };
+        if (!id) { reset(null); return; }
+        api(endpointWithId('bots', id)).then(function (payload) { reset(payload.data || null); }).catch(function (error) { showToast('Falha ao abrir bot', error.message, 'alert-triangle'); });
+    }
+
+    function botPayload() {
+        var trigger = fieldValue('impulso-bot-trigger') || 'first_message';
+        var values = fieldValue('impulso-bot-trigger-values').split(',').map(function (value) { return value.trim(); }).filter(Boolean);
+        return {
+            name: fieldValue('impulso-bot-name'),
+            instance_id: Number(fieldValue('impulso-bot-instance') || 0) || null,
+            description: fieldValue('impulso-bot-description'),
+            trigger_type: trigger,
+            trigger_config: trigger === 'keyword' ? { values: values } : {},
+            definition: botDefinitionFromField(),
+            fallback_message: fieldValue('impulso-bot-fallback'),
+            handoff_message: fieldValue('impulso-bot-handoff'),
+            max_fallbacks: Number(fieldValue('impulso-bot-max-fallbacks') || 2),
+            ignore_groups: !!((document.getElementById('impulso-bot-ignore-groups') || {}).checked)
+        };
+    }
+
+    function saveBot(button) {
+        var id = Number(fieldValue('impulso-bot-id') || 0), body;
+        try { body = botPayload(); } catch (error) { showToast('Fluxo inválido', error.message, 'alert-triangle'); return; }
+        if (!body.name) { showToast('Dados incompletos', 'Informe o nome do bot.', 'alert-circle'); return; }
+        button.disabled = true;
+        api(id ? endpointWithId('bots', id) : endpoint('bots'), { method: id ? 'PUT' : 'POST', body: body }).then(function () {
+            closeModal(button); showToast('Bot salvo', 'O fluxo foi validado e salvo como rascunho.', 'check-circle'); window.location.reload();
+        }).catch(function (error) { showToast('Falha ao salvar bot', error.message, 'alert-triangle'); }).finally(function () { button.disabled = false; });
+    }
+
+    function publishOrToggleBot(id, action, button) {
+        if (!id) return;
+        button.disabled = true;
+        api(endpointWithId('bots', id, '/' + action), { method: 'POST', body: {} }).then(function () {
+            showToast(action === 'publish' ? 'Bot publicado' : 'Estado atualizado', 'A alteração foi aplicada.', 'check-circle'); window.location.reload();
+        }).catch(function (error) { showToast('Falha no bot', error.message, 'alert-triangle'); }).finally(function () { button.disabled = false; });
+    }
+
+    function simulateBot(button) {
+        var definition;
+        try { definition = botDefinitionFromField(); } catch (error) { showToast('Fluxo inválido', error.message, 'alert-triangle'); return; }
+        var inputs = fieldValue('impulso-bot-simulation-inputs').split(/\r?\n/).map(function (value) { return value.trim(); }).filter(Boolean);
+        button.disabled = true;
+        api(endpoint('bots') + '/simulate', { method: 'POST', body: { definition: definition, inputs: inputs } }).then(function (payload) {
+            var result = document.getElementById('impulso-bot-simulation-result');
+            if (result) { result.textContent = JSON.stringify(payload.data || {}, null, 2); result.classList.remove('impulso-hidden'); }
+            showToast('Simulação concluída', 'Nenhuma mensagem real foi enviada.', 'play');
+        }).catch(function (error) { showToast('Falha na simulação', error.message, 'alert-triangle'); }).finally(function () { button.disabled = false; });
+    }
+
+    function toggleConversationBot(button) {
+        var conversation = activeConversation();
+        if (!conversation) return;
+        var pause = conversation.bot_status === 'active';
+        button.disabled = true;
+        api(endpointWithId('conversations', conversation.id, '/bot/' + (pause ? 'pause' : 'resume')), { method: 'POST', body: pause ? { reason: 'manual_pause' } : {} }).then(function () {
+            conversation.bot_status = pause ? 'paused' : 'active';
+            applyActiveConversation(conversation);
+            showToast(pause ? 'Bot pausado' : 'Bot retomado', pause ? 'Somente o atendente responderá nesta conversa.' : 'O fluxo poderá responder às próximas mensagens.', 'power');
+        }).catch(function (error) { showToast('Falha ao alterar bot', error.message, 'alert-triangle'); }).finally(function () { button.disabled = false; });
     }
 
     function testInstance(id, button) {
@@ -1088,17 +1301,16 @@
 
     function applyInitialSettings() {
         var values = {
-            'impulso-setting-module-name': initialSettings.module_name || 'Impulso Hub',
+            'impulso-setting-module-name': initialSettings.module_name || 'Impulso Hub WhatsApp',
             'impulso-setting-timezone': initialSettings.timezone || 'America/Sao_Paulo',
             'impulso-setting-polling': initialSettings.polling_interval_ms || 5000,
             'impulso-setting-page-size': initialSettings.conversation_page_size || 30,
             'impulso-setting-default-status': initialSettings.default_status || 'open',
             'impulso-setting-default-priority': initialSettings.default_priority || 'normal',
-            'impulso-setting-sla-minutes': initialSettings.sla_minutes || 30,
             'impulso-setting-auto-resolve-hours': initialSettings.auto_resolve_hours || 0,
             'impulso-setting-base-url': initialSettings.evolution_base_url || '',
             'impulso-setting-timeout': initialSettings.request_timeout_seconds || 30,
-            'impulso-setting-evolution-retries': initialSettings.evolution_retries == null ? 2 : initialSettings.evolution_retries,
+            'impulso-setting-evolution-retries': initialSettings.evolution_retries || 0,
             'impulso-setting-status-path': initialSettings.connection_status_path || '/instance/connectionState/{instance}',
             'impulso-setting-chats-path': initialSettings.find_chats_path || '/chat/findChats/{instance}',
             'impulso-setting-messages-path': initialSettings.find_messages_path || '/chat/findMessages/{instance}',
@@ -1106,48 +1318,35 @@
             'impulso-setting-send-media-path': initialSettings.send_media_path || '/message/sendMedia/{instance}',
             'impulso-setting-send-audio-path': initialSettings.send_audio_path || '/message/sendWhatsAppAudio/{instance}',
             'impulso-setting-media-base64-path': initialSettings.get_media_base64_path || '/chat/getBase64FromMediaMessage/{instance}',
-            'impulso-setting-n8n-base-url': initialSettings.n8n_base_url || '',
-            'impulso-setting-n8n-auth-mode': initialSettings.n8n_auth_mode || 'bearer',
-            'impulso-setting-n8n-header-name': initialSettings.n8n_header_name || 'X-API-Key',
-            'impulso-setting-n8n-timeout': initialSettings.n8n_timeout_seconds || 30,
-            'impulso-setting-n8n-health-path': initialSettings.n8n_health_path || '/healthz',
-            'impulso-setting-n8n-campaigns-path': initialSettings.n8n_campaigns_path || '/webhook/campanha',
-            'impulso-setting-n8n-ai-path': initialSettings.n8n_ai_path || '/webhook/iara/control',
-            'impulso-setting-n8n-events-path': initialSettings.n8n_events_path || '/webhook/impulso/events',
             'impulso-setting-campaign-start': initialSettings.campaign_window_start || '08:00',
             'impulso-setting-campaign-end': initialSettings.campaign_window_end || '20:00',
-            'impulso-setting-campaign-batch-size': initialSettings.campaign_batch_size || 20,
-            'impulso-setting-campaign-min-interval': initialSettings.campaign_min_interval_seconds || 8,
-            'impulso-setting-campaign-pause-errors': initialSettings.campaign_pause_after_errors || 5,
-            'impulso-setting-campaign-optout': initialSettings.campaign_optout_text || '',
-            'impulso-setting-quick-replies': initialSettings.quick_replies_json || '',
-            'impulso-setting-ai-default-state': initialSettings.ai_default_state || 'running',
-            'impulso-setting-ai-stop-command': initialSettings.ai_stop_command || '@stop',
-            'impulso-setting-ai-start-command': initialSettings.ai_start_command || '@start',
-            'impulso-setting-ai-return-minutes': initialSettings.ai_auto_return_minutes || 0,
+            'impulso-setting-campaign-rate-limit': initialSettings.campaign_default_rate_limit_per_minute || 20,
+            'impulso-setting-campaign-max-attempts': initialSettings.campaign_recipient_max_attempts || 5,
+            'impulso-setting-campaign-retry-delay': initialSettings.campaign_retry_delay_seconds || 120,
+            'impulso-setting-quick-replies': initialSettings.quick_replies_json || '[]',
+            'impulso-setting-bot-timeout': initialSettings.bot_session_timeout_minutes || 1440,
+            'impulso-setting-bot-fallback': initialSettings.bot_default_fallback || '',
+            'impulso-setting-bot-handoff': initialSettings.bot_default_handoff || '',
             'impulso-setting-webhook-retention': initialSettings.webhook_retention_days || 30,
-            'impulso-setting-audit-retention': initialSettings.audit_retention_days || 180,
             'impulso-setting-conversation-retention': initialSettings.conversation_retention_days || 0,
             'impulso-setting-media-retention': initialSettings.media_retention_days || 30
         };
         Object.keys(values).forEach(function (id) { setField(id, values[id]); });
         setField('impulso-setting-global-key', '');
-        setField('impulso-setting-n8n-token', '');
         setField('impulso-setting-webhook-secret', '');
         var flags = {
             'impulso-setting-sound': initialSettings.sound_enabled !== false && initialSettings.sound_enabled !== 0 && initialSettings.sound_enabled !== '0',
             'impulso-setting-browser-notifications': !!initialSettings.browser_notifications_enabled,
             'impulso-setting-auto-read': initialSettings.auto_mark_read !== false && initialSettings.auto_mark_read !== 0 && initialSettings.auto_mark_read !== '0',
-            'impulso-setting-ai-human-priority': initialSettings.ai_human_priority !== false && initialSettings.ai_human_priority !== 0 && initialSettings.ai_human_priority !== '0',
-            'impulso-setting-ai-show-context': initialSettings.ai_show_context !== false && initialSettings.ai_show_context !== 0 && initialSettings.ai_show_context !== '0',
+            'impulso-setting-campaign-pause-errors': Number(initialSettings.campaign_pause_after_errors || 0) > 0,
+            'impulso-setting-bot-enabled': initialSettings.bot_enabled !== false && initialSettings.bot_enabled !== 0 && initialSettings.bot_enabled !== '0',
             'impulso-setting-log-webhooks': initialSettings.log_sanitized_webhooks !== false && initialSettings.log_sanitized_webhooks !== 0 && initialSettings.log_sanitized_webhooks !== '0',
-            'impulso-setting-audit-enabled': initialSettings.audit_enabled !== false && initialSettings.audit_enabled !== 0 && initialSettings.audit_enabled !== '0',
             'impulso-setting-secure-media': initialSettings.secure_media !== false && initialSettings.secure_media !== 0 && initialSettings.secure_media !== '0'
-            ,'impulso-setting-n8n-private-networks': initialSettings.n8n_allow_private_networks !== false && initialSettings.n8n_allow_private_networks !== 0 && initialSettings.n8n_allow_private_networks !== '0'
-            ,'impulso-setting-campaign-optout': initialSettings.campaign_optout_text !== '' && initialSettings.campaign_optout_text !== 0 && initialSettings.campaign_optout_text !== '0'
-            ,'impulso-setting-campaign-pause-errors': Number(initialSettings.campaign_pause_after_errors || 0) > 0
         };
-        Object.keys(flags).forEach(function (id) { var element = document.getElementById(id); if (element) element.checked = flags[id]; });
+        Object.keys(flags).forEach(function (id) {
+            var element = document.getElementById(id);
+            if (element) element.checked = flags[id];
+        });
         setText('impulso-global-key-mask', initialSettings.global_api_key_masked || 'Não configurada');
         setText('impulso-webhook-secret-mask', initialSettings.webhook_secret_masked || 'Não configurado');
     }
@@ -1168,7 +1367,6 @@
             auto_mark_read: checkedValue('impulso-setting-auto-read'),
             default_status: fieldValue('impulso-setting-default-status'),
             default_priority: fieldValue('impulso-setting-default-priority'),
-            sla_minutes: Number(fieldValue('impulso-setting-sla-minutes') || 30),
             auto_resolve_hours: Number(fieldValue('impulso-setting-auto-resolve-hours') || 0),
             evolution_base_url: fieldValue('impulso-setting-base-url'),
             global_api_key: fieldValue('impulso-setting-global-key'),
@@ -1181,34 +1379,20 @@
             send_media_path: fieldValue('impulso-setting-send-media-path'),
             send_audio_path: fieldValue('impulso-setting-send-audio-path'),
             get_media_base64_path: fieldValue('impulso-setting-media-base64-path'),
-            n8n_base_url: fieldValue('impulso-setting-n8n-base-url'),
-            n8n_token: fieldValue('impulso-setting-n8n-token'),
-            n8n_auth_mode: fieldValue('impulso-setting-n8n-auth-mode'),
-            n8n_header_name: fieldValue('impulso-setting-n8n-header-name'),
-            n8n_allow_private_networks: checkedValue('impulso-setting-n8n-private-networks'),
-            n8n_timeout_seconds: Number(fieldValue('impulso-setting-n8n-timeout') || 30),
-            n8n_health_path: fieldValue('impulso-setting-n8n-health-path'),
-            n8n_campaigns_path: fieldValue('impulso-setting-n8n-campaigns-path'),
-            n8n_ai_path: fieldValue('impulso-setting-n8n-ai-path'),
-            n8n_events_path: fieldValue('impulso-setting-n8n-events-path'),
             campaign_window_start: fieldValue('impulso-setting-campaign-start'),
             campaign_window_end: fieldValue('impulso-setting-campaign-end'),
-            campaign_batch_size: Number(fieldValue('impulso-setting-campaign-batch-size') || 20),
-            campaign_min_interval_seconds: Number(fieldValue('impulso-setting-campaign-min-interval') || 8),
+            campaign_default_rate_limit_per_minute: Number(fieldValue('impulso-setting-campaign-rate-limit') || 20),
+            campaign_recipient_max_attempts: Number(fieldValue('impulso-setting-campaign-max-attempts') || 5),
+            campaign_retry_delay_seconds: Number(fieldValue('impulso-setting-campaign-retry-delay') || 120),
             campaign_pause_after_errors: checkedValue('impulso-setting-campaign-pause-errors') ? 5 : 0,
-            campaign_optout_text: checkedValue('impulso-setting-campaign-optout') ? 'automatic' : '',
             quick_replies_json: fieldValue('impulso-setting-quick-replies'),
-            ai_default_state: fieldValue('impulso-setting-ai-default-state'),
-            ai_human_priority: checkedValue('impulso-setting-ai-human-priority'),
-            ai_show_context: checkedValue('impulso-setting-ai-show-context'),
-            ai_stop_command: fieldValue('impulso-setting-ai-stop-command'),
-            ai_start_command: fieldValue('impulso-setting-ai-start-command'),
-            ai_auto_return_minutes: Number(fieldValue('impulso-setting-ai-return-minutes') || 0),
+            bot_enabled: checkedValue('impulso-setting-bot-enabled'),
+            bot_session_timeout_minutes: Number(fieldValue('impulso-setting-bot-timeout') || 1440),
+            bot_default_fallback: fieldValue('impulso-setting-bot-fallback'),
+            bot_default_handoff: fieldValue('impulso-setting-bot-handoff'),
             webhook_secret: fieldValue('impulso-setting-webhook-secret'),
             log_sanitized_webhooks: checkedValue('impulso-setting-log-webhooks'),
             webhook_retention_days: Number(fieldValue('impulso-setting-webhook-retention') || 30),
-            audit_enabled: checkedValue('impulso-setting-audit-enabled'),
-            audit_retention_days: Number(fieldValue('impulso-setting-audit-retention') || 180),
             conversation_retention_days: Number(fieldValue('impulso-setting-conversation-retention') || 0),
             media_retention_days: Number(fieldValue('impulso-setting-media-retention') || 30),
             secure_media: checkedValue('impulso-setting-secure-media')
@@ -1249,6 +1433,9 @@
                 this.classList.add('active');
             });
         });
+        var providerSelect = document.getElementById('impulso-instance-provider');
+        if (providerSelect) providerSelect.addEventListener('change', updateInstanceProviderSections);
+        updateInstanceProviderSections();
         var contactSearch = document.getElementById('impulso-contact-search');
         if (contactSearch) contactSearch.addEventListener('input', function () {
             var query = this.value.trim().toLowerCase();
@@ -1266,8 +1453,15 @@
         var action = trigger.getAttribute('data-impulso-action');
         var submit = trigger.getAttribute('data-impulso-modal-submit');
         if (submit === 'instance') { saveInstance(trigger); return; }
+        if (submit === 'bot') { saveBot(trigger); return; }
         if (submit) return;
         if (action === 'refresh-dashboard') { window.location.reload(); return; }
+        if (action === 'toggle-conversation-bot') { toggleConversationBot(trigger); return; }
+        if (action === 'new-bot') { openBotModal(0); return; }
+        if (action === 'edit-bot') { openBotModal(trigger.getAttribute('data-bot-id')); return; }
+        if (action === 'publish-bot') { publishOrToggleBot(trigger.getAttribute('data-bot-id'), 'publish', trigger); return; }
+        if (action === 'toggle-bot') { publishOrToggleBot(trigger.getAttribute('data-bot-id'), 'toggle', trigger); return; }
+        if (action === 'simulate-bot') { simulateBot(trigger); return; }
         if (action === 'new-instance') { openInstanceModal(0); return; }
         if (action === 'edit-instance') { openInstanceModal(trigger.getAttribute('data-instance-id')); return; }
         if (action === 'test-instance') { testInstance(trigger.getAttribute('data-instance-id'), trigger); return; }
@@ -1285,7 +1479,7 @@
             if (contact) contact.classList.toggle('open');
             return;
         }
-        if (action === 'emoji' || action === 'attach' || action === 'voice' || action === 'quick-replies' || action === 'resolve-conversation' || action === 'toggle-priority' || action === 'search-history' || action === 'close-history-search' || action === 'call-contact' || action === 'edit-contact' || action === 'contact-menu' || action === 'edit-assignment' || action === 'edit-tags' || action === 'toggle-ai-conversation') return;
+        if (action === 'emoji' || action === 'attach' || action === 'voice' || action === 'quick-replies' || action === 'resolve-conversation' || action === 'toggle-priority' || action === 'search-history' || action === 'close-history-search' || action === 'call-contact' || action === 'edit-contact' || action === 'contact-menu' || action === 'edit-assignment' || action === 'edit-tags') return;
         if (action === 'toggle-password') {
             var password = trigger.parentElement ? trigger.parentElement.querySelector('input') : null;
             if (password) password.type = password.type === 'password' ? 'text' : 'password';

@@ -2,13 +2,36 @@
 
 declare(strict_types=1);
 
+// The production host (CodeIgniter/Rise) requires mbstring. These small
+// fallbacks keep the dependency-free unit suite executable in minimal CI images.
+if (!function_exists('mb_strlen')) {
+    function mb_strlen(string $value, ?string $encoding = null): int { return strlen($value); }
+}
+if (!function_exists('mb_substr')) {
+    function mb_substr(string $value, int $offset, ?int $length = null, ?string $encoding = null): string
+    {
+        return $length === null ? substr($value, $offset) : substr($value, $offset, $length);
+    }
+}
+if (!function_exists('mb_strtolower')) {
+    function mb_strtolower(string $value, ?string $encoding = null): string { return strtolower($value); }
+}
+
 use Chatwoot_plugin\Libraries\Evolution_client;
+use Chatwoot_plugin\Libraries\Meta_cloud_client;
+use Chatwoot_plugin\Providers\Provider_capabilities;
+use Chatwoot_plugin\Services\Bot_flow_validator;
+use Chatwoot_plugin\Services\Meta_webhook_normalizer;
 use Chatwoot_plugin\Services\Payload_sanitizer;
 use Chatwoot_plugin\Services\Webhook_normalizer;
 
 require_once dirname(__DIR__) . '/Services/Payload_sanitizer.php';
 require_once dirname(__DIR__) . '/Services/Webhook_normalizer.php';
 require_once dirname(__DIR__) . '/Libraries/Evolution_client.php';
+require_once dirname(__DIR__) . '/Libraries/Meta_cloud_client.php';
+require_once dirname(__DIR__) . '/Providers/Provider_capabilities.php';
+require_once dirname(__DIR__) . '/Services/Bot_flow_validator.php';
+require_once dirname(__DIR__) . '/Services/Meta_webhook_normalizer.php';
 
 $tests = [];
 $failures = [];
@@ -41,6 +64,18 @@ $assertNotContains = static function (string $needle, string $haystack, string $
     if ($needle !== '' && str_contains($haystack, $needle)) {
         throw new RuntimeException($message !== '' ? $message : 'Sensitive value was exposed.');
     }
+};
+
+$assertThrows = static function (callable $callback, string $expectedClass = Throwable::class): Throwable {
+    try {
+        $callback();
+    } catch (Throwable $exception) {
+        if (!$exception instanceof $expectedClass) {
+            throw new RuntimeException('Unexpected exception class: ' . get_class($exception));
+        }
+        return $exception;
+    }
+    throw new RuntimeException('Expected exception was not thrown.');
 };
 
 $test('Evolution endpoints, header, body, status mapping and message id', static function () use ($assertTrue, $assertSame): void {
@@ -309,7 +344,7 @@ $test('Evolution LID keeps conversation identity and uses remoteJidAlt as phone'
     $assertSame('', $unresolved['phone_number']);
 });
 
-$test('n8n normalized audio/document fields and stable fallback dedupe', static function () use ($assertSame, $assertTrue): void {
+$test('Legacy normalized audio/document fields and stable fallback dedupe', static function () use ($assertSame, $assertTrue): void {
     $normalizer = new Webhook_normalizer();
     $payload = [
         'event_name' => 'messages.upsert',
@@ -349,7 +384,7 @@ $test('n8n normalized audio/document fields and stable fallback dedupe', static 
     $assertTrue(str_starts_with($document['dedupe_key'], 'message:'));
 });
 
-$test('n8n body envelope and nested media are normalized', static function () use ($assertSame): void {
+$test('Legacy body envelope and nested media are normalized', static function () use ($assertSame): void {
     $normalizer = new Webhook_normalizer();
     $normalized = $normalizer->normalize([
         'body' => json_encode([
@@ -375,6 +410,220 @@ $test('n8n body envelope and nested media are normalized', static function () us
     $assertSame('https://media.example.test/body.pdf', $normalized['media_url']);
     $assertSame('application/pdf', $normalized['mime_type']);
     $assertSame('body.pdf', $normalized['file_name']);
+});
+
+
+$test('Outgoing Evolution events never rename the customer from pushName or contact_name', static function () use ($assertSame): void {
+    $normalizer = new Webhook_normalizer();
+    $normalized = $normalizer->normalize([
+        'event' => 'messages.upsert',
+        'instance' => 'principal',
+        'data' => [
+            'key' => [
+                'id' => 'OUT-1',
+                'remoteJid' => '5511999990000@s.whatsapp.net',
+                'fromMe' => true,
+            ],
+            'pushName' => 'Tiago',
+            'contactName' => 'Tiago',
+            'message' => ['conversation' => 'Mensagem enviada'],
+        ],
+    ]);
+
+    $assertSame(true, $normalized['from_me']);
+    $assertSame('outgoing', $normalized['direction']);
+    $assertSame('', $normalized['contact_name']);
+    $assertSame('', $normalized['sender_name']);
+});
+
+$test('Evolution group events preserve group and participant identities independently', static function () use ($assertSame, $assertTrue): void {
+    $normalizer = new Webhook_normalizer();
+    $normalized = $normalizer->normalize([
+        'event' => 'messages.upsert',
+        'instance' => 'principal',
+        'data' => [
+            'key' => [
+                'id' => 'GROUP-1',
+                'remoteJid' => '120363012345678901@g.us',
+                'participant' => '5511987654321@s.whatsapp.net',
+                'fromMe' => false,
+            ],
+            'pushName' => 'Maria Silva',
+            'subject' => 'Pais Bombeiro Mirim',
+            'message' => ['conversation' => 'Bom dia, pessoal'],
+        ],
+    ]);
+
+    $assertSame(true, $normalized['is_group']);
+    $assertSame('group', $normalized['conversation_type']);
+    $assertSame('120363012345678901@g.us', $normalized['remote_jid']);
+    $assertSame('Pais Bombeiro Mirim', $normalized['group_name']);
+    $assertSame('Pais Bombeiro Mirim', $normalized['contact_name']);
+    $assertSame('5511987654321@s.whatsapp.net', $normalized['participant_jid']);
+    $assertSame('5511987654321@s.whatsapp.net', $normalized['sender_jid']);
+    $assertSame('5511987654321', $normalized['sender_phone']);
+    $assertSame('Maria Silva', $normalized['sender_name']);
+    $assertTrue(str_starts_with($normalized['dedupe_key'], 'message:'));
+});
+
+$test('Meta Cloud client builds official payloads, validates signature and hides credentials', static function () use ($assertTrue, $assertSame, $assertNotContains): void {
+    $calls = [];
+    $token = 'meta-token-super-secret';
+    $appSecret = 'meta-app-secret';
+    $transport = static function ($method, $url, $headers, $body, $options) use (&$calls): array {
+        $calls[] = compact('method', 'url', 'headers', 'body', 'options');
+        if ($method === 'POST') {
+            return ['status_code' => 200, 'body' => json_encode(['messages' => [['id' => 'wamid.TEST-1']]])];
+        }
+        return ['status_code' => 200, 'body' => json_encode(['data' => [['name' => 'saudacao', 'status' => 'APPROVED']]])];
+    };
+    $client = new Meta_cloud_client([
+        'phone_number_id' => '123456789',
+        'waba_id' => '987654321',
+        'access_token' => $token,
+        'app_secret' => $appSecret,
+        'graph_version' => 'v25.0',
+    ], $transport);
+
+    $raw = '{"object":"whatsapp_business_account"}';
+    $signature = 'sha256=' . hash_hmac('sha256', $raw, $appSecret);
+    $assertTrue($client->verifySignature($raw, $signature));
+    $assertSame(false, $client->verifySignature($raw . 'x', $signature));
+
+    $response = $client->sendText('+55 (11) 99999-0000', 'Bom dia');
+    $assertTrue($response['success']);
+    $assertSame('wamid.TEST-1', $response['message_id']);
+    $assertSame('POST', $calls[0]['method']);
+    $assertSame('https://graph.facebook.com/v25.0/123456789/messages', $calls[0]['url']);
+    $payload = json_decode($calls[0]['body'], true);
+    $assertSame('5511999990000', $payload['to']);
+    $assertSame('individual', $payload['recipient_type']);
+    $assertSame('Bom dia', $payload['text']['body']);
+    $headers = implode("\n", $calls[0]['headers']);
+    $assertTrue(str_contains($headers, 'Authorization: Bearer ' . $token));
+    $assertNotContains($token, (string) json_encode($response));
+
+    $templates = $client->listTemplates(500);
+    $assertTrue($templates['success']);
+    $assertTrue(str_contains($calls[1]['url'], '/987654321/message_templates?'));
+    $assertTrue(str_contains($calls[1]['url'], 'limit=250'));
+});
+
+$test('Meta webhook expands incoming message and delivery receipt into neutral events', static function () use ($assertSame): void {
+    $normalizer = new Meta_webhook_normalizer();
+    $events = $normalizer->expand([
+        'object' => 'whatsapp_business_account',
+        'entry' => [[
+            'changes' => [[
+                'field' => 'messages',
+                'value' => [
+                    'metadata' => ['phone_number_id' => '123456789'],
+                    'contacts' => [['wa_id' => '5511987654321', 'profile' => ['name' => 'Maria']]],
+                    'messages' => [[
+                        'from' => '5511987654321',
+                        'id' => 'wamid.IN-1',
+                        'timestamp' => '1785440000',
+                        'type' => 'text',
+                        'text' => ['body' => 'Quero conhecer o projeto'],
+                    ]],
+                    'statuses' => [[
+                        'id' => 'wamid.OUT-1',
+                        'recipient_id' => '5511987654321',
+                        'timestamp' => '1785440001',
+                        'status' => 'delivered',
+                    ]],
+                ],
+            ]],
+        ]],
+    ], 'meta-principal');
+
+    $assertSame(2, count($events));
+    $assertSame('messages.upsert', $events[0]['event']);
+    $assertSame('meta-principal', $events[0]['instance_name']);
+    $assertSame('Maria', $events[0]['contact_name']);
+    $assertSame('Quero conhecer o projeto', $events[0]['text']);
+    $assertSame('meta_cloud', $events[0]['provider_name']);
+    $assertSame('messages.update', $events[1]['event']);
+    $assertSame('delivered', $events[1]['message_status']);
+    $assertSame('wamid.OUT-1|delivered', $events[1]['external_event_id']);
+});
+
+$test('Deterministic bot validates, matches accents and simulates completion without AI', static function () use ($assertSame, $assertTrue): void {
+    $validator = new Bot_flow_validator();
+    $definition = [
+        'start' => 'inicio',
+        'nodes' => [
+            'inicio' => [
+                'message' => 'Como posso ajudar?',
+                'transitions' => [[
+                    'id' => 'horarios',
+                    'target' => 'fim',
+                    'match' => ['type' => 'contains', 'values' => ['horário']],
+                ]],
+                'fallback_target' => '__handoff__',
+            ],
+            'fim' => [
+                'message' => 'Temos turmas de manhã e à tarde.',
+                'transitions' => [],
+                'terminal' => true,
+            ],
+        ],
+    ];
+
+    $validated = $validator->validate($definition);
+    $match = $validator->matchTransition($validated['nodes']['inicio']['transitions'], 'Quais sao os HORARIOS?');
+    $assertSame('horarios', $match['id']);
+    $result = $validator->simulate($definition, ['Quais são os horários?']);
+    $assertTrue($result['valid']);
+    $assertSame('completed', $result['result']);
+    $assertSame('fim', $result['current_node']);
+});
+
+$test('Deterministic bot rejects ambiguous rules and hands off unknown input', static function () use ($assertThrows, $assertSame): void {
+    $validator = new Bot_flow_validator();
+    $ambiguous = [
+        'start' => 'inicio',
+        'nodes' => [
+            'inicio' => [
+                'message' => 'Escolha uma opção',
+                'transitions' => [
+                    ['id' => 'a', 'target' => '__handoff__', 'match' => ['type' => 'exact', 'values' => ['sim']]],
+                    ['id' => 'b', 'target' => '__handoff__', 'match' => ['type' => 'contains', 'values' => ['SIM']]],
+                ],
+            ],
+        ],
+    ];
+    $assertThrows(static fn () => $validator->validate($ambiguous), InvalidArgumentException::class);
+
+    $safe = [
+        'start' => 'inicio',
+        'nodes' => [
+            'inicio' => [
+                'message' => 'Escolha uma opção',
+                'transitions' => [['id' => 'sim', 'target' => '__handoff__', 'match' => ['type' => 'exact', 'values' => ['sim']]]],
+                'fallback_target' => '__handoff__',
+            ],
+        ],
+    ];
+    $result = $validator->simulate($safe, ['pergunta completamente fora do escopo']);
+    $assertSame('handoff', $result['result']);
+    $assertSame(1, $result['fallbacks']);
+});
+
+$test('Provider capability matrix prevents official group/template confusion', static function () use ($assertSame): void {
+    $evolution = Provider_capabilities::evolution();
+    $meta = Provider_capabilities::metaCloud();
+    $assertSame(true, $evolution['groups']);
+    $assertSame(true, $evolution['supports_groups']);
+    $assertSame(false, $evolution['templates']);
+    $assertSame(false, $evolution['supports_templates']);
+    $assertSame(false, $evolution['official']);
+    $assertSame(false, $meta['groups']);
+    $assertSame(false, $meta['supports_groups']);
+    $assertSame(true, $meta['templates']);
+    $assertSame(true, $meta['supports_templates']);
+    $assertSame(true, $meta['official']);
+    $assertSame(false, $meta['freeform_outside_window']);
 });
 
 echo "\n" . count($tests) . " passed, " . count($failures) . " failed.\n";

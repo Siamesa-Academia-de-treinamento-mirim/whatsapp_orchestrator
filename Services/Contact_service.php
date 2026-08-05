@@ -144,6 +144,8 @@ class Contact_service
         $payload = [
             'instance_id' => $instanceId,
             'name' => mb_substr($name, 0, 191),
+            'name_source' => $automatic ? (string) ($input['name_source'] ?? ($existing['name_source'] ?? 'automatic')) : 'manual',
+            'name_updated_at' => gmdate('Y-m-d H:i:s'),
             'phone_normalized' => $phone,
             'email' => $email ?: null,
             'company' => $this->nullableText($input['company'] ?? null, 191),
@@ -155,8 +157,14 @@ class Contact_service
             'scope_key' => $scopeKey,
             'last_activity_at' => $input['last_activity_at'] ?? ($existing['last_activity_at'] ?? null),
         ];
-        if ($automatic && $existing && !empty($existing['manually_edited'])) {
-            foreach (['name', 'email', 'company', 'city', 'notes', 'opt_out'] as $field) unset($payload[$field]);
+        if ($automatic && $existing) {
+            $allowNameUpdate = !empty($input['allow_name_update']) && empty($existing['manually_edited']);
+            if (!$allowNameUpdate) {
+                unset($payload['name'], $payload['name_source'], $payload['name_updated_at']);
+            }
+            if (!empty($existing['manually_edited'])) {
+                foreach (['email', 'company', 'city', 'notes', 'opt_out'] as $field) unset($payload[$field]);
+            }
         }
 
         $this->db->transStart();
@@ -178,30 +186,49 @@ class Contact_service
 
     public function resolve_for_message(int $instanceId, array $normalized, int $conversationId = 0): array
     {
+        // A group is the conversation identity, while each author is handled by
+        // Group_service. Creating a contact for the @g.us JID corrupts contacts.
+        if (!empty($normalized['is_group']) || str_ends_with(strtolower(trim((string) ($normalized['remote_jid'] ?? ''))), '@g.us')) {
+            return [];
+        }
+
         $remoteJid = trim((string) ($normalized['remote_jid'] ?? ''));
         $alternateJid = trim((string) ($normalized['alternate_remote_jid'] ?? ''));
         $phone = trim((string) ($normalized['phone_number'] ?? ''));
         if ($phone === '') {
             foreach ([$alternateJid, $remoteJid] as $jid) {
-                if (str_ends_with($jid, '@s.whatsapp.net')) { $phone = strstr($jid, '@', true) ?: ''; break; }
+                if (str_ends_with(strtolower($jid), '@s.whatsapp.net')) {
+                    $phone = strstr($jid, '@', true) ?: '';
+                    break;
+                }
             }
         }
         if ($phone === '') throw new InvalidArgumentException('Mensagem sem telefone resolvivel para contato.');
         $phone = $this->normalize_phone($phone);
 
-        $contact = null;
-        foreach ([['jid', $remoteJid], ['jid', $alternateJid], ['phone', $phone]] as [$type, $value]) {
-            if ($value === '') continue;
-            $identifier = $this->identifiers->find_identifier($instanceId, $type, $value);
-            if ($identifier) { $contact = $this->contacts->get_by_id((int) $identifier['contact_id']); break; }
+        $contact = $this->findByIdentifiers($instanceId, $remoteJid, $alternateJid, $phone);
+
+        // fromMe pushName belongs to the connected account. Never use it to
+        // create or rename the customer. Existing contact linkage is enough.
+        if (!empty($normalized['from_me'])) {
+            if ($contact && $conversationId > 0) {
+                $this->db->table('chat_conversations')->where('id', $conversationId)->update([
+                    'contact_id' => (int) $contact['id'],
+                    'updated_at' => gmdate('Y-m-d H:i:s'),
+                ]);
+            }
+            return $contact ? $this->get((int) $contact['id']) ?? $contact : [];
         }
-        $contact ??= $this->contacts->find_by_phone($phone, $instanceId);
-        $name = trim((string) ($normalized['contact_name'] ?? '')) ?: ($contact['name'] ?? $phone);
+
+        $incomingName = trim((string) ($normalized['contact_name'] ?? $normalized['sender_name'] ?? ''));
+        $name = $incomingName !== '' ? $incomingName : (string) ($contact['name'] ?? $phone);
         $saved = $this->save([
             'name' => $name,
             'phone' => $phone,
             'instance_id' => $contact['instance_id'] ?? $instanceId,
             'source' => 'whatsapp',
+            'name_source' => 'incoming_push_name',
+            'allow_name_update' => $incomingName !== '',
             'last_activity_at' => gmdate('Y-m-d H:i:s', (int) ($normalized['timestamp'] ?? time())),
             'opt_out' => (int) ($contact['opt_out'] ?? 0),
         ], 0, $contact ? (int) $contact['id'] : null, true);
@@ -209,10 +236,57 @@ class Contact_service
         foreach ([['jid', $remoteJid], ['jid', $alternateJid], ['phone', $phone]] as [$type, $value]) {
             if ($value !== '') $this->identifiers->add_identifier($contactId, $instanceId, $type, $value, $type === 'phone');
         }
+        if ($incomingName !== '') {
+            $this->db->table('chat_contacts')->where('id', $contactId)->update([
+                'last_incoming_name' => mb_substr($incomingName, 0, 191),
+                'last_incoming_name_at' => gmdate('Y-m-d H:i:s'),
+                'updated_at' => gmdate('Y-m-d H:i:s'),
+            ]);
+        }
         if ($conversationId > 0) {
             $this->db->table('chat_conversations')->where('id', $conversationId)->update(['contact_id' => $contactId, 'updated_at' => gmdate('Y-m-d H:i:s')]);
         }
         return $saved;
+    }
+
+    /** Creates or resolves a real person who authored a group message. */
+    public function resolve_for_participant(int $instanceId, array $normalized): array
+    {
+        $jid = trim((string) ($normalized['participant_jid'] ?? $normalized['sender_jid'] ?? ''));
+        $phone = trim((string) ($normalized['sender_phone'] ?? ''));
+        if ($phone === '' && str_ends_with(strtolower($jid), '@s.whatsapp.net')) {
+            $phone = strstr($jid, '@', true) ?: '';
+        }
+        if ($phone === '') throw new InvalidArgumentException('Participante sem telefone resolvivel.');
+        $phone = $this->normalize_phone($phone);
+        $contact = $this->findByIdentifiers($instanceId, $jid, '', $phone);
+        $incomingName = trim((string) ($normalized['sender_name'] ?? ''));
+        $name = $incomingName !== '' ? $incomingName : (string) ($contact['name'] ?? $phone);
+        $saved = $this->save([
+            'name' => $name,
+            'phone' => $phone,
+            'instance_id' => $contact['instance_id'] ?? $instanceId,
+            'source' => 'whatsapp_group',
+            'name_source' => 'group_participant',
+            'allow_name_update' => $incomingName !== '',
+            'last_activity_at' => gmdate('Y-m-d H:i:s', (int) ($normalized['timestamp'] ?? time())),
+            'opt_out' => (int) ($contact['opt_out'] ?? 0),
+        ], 0, $contact ? (int) $contact['id'] : null, true);
+        $contactId = (int) $saved['id'];
+        foreach ([['jid', $jid], ['phone', $phone]] as [$type, $value]) {
+            if ($value !== '') $this->identifiers->add_identifier($contactId, $instanceId, $type, $value, $type === 'phone');
+        }
+        return $saved;
+    }
+
+    private function findByIdentifiers(int $instanceId, string $remoteJid, string $alternateJid, string $phone): ?array
+    {
+        foreach ([['jid', $remoteJid], ['jid', $alternateJid], ['phone', $phone]] as [$type, $value]) {
+            if ($value === '') continue;
+            $identifier = $this->identifiers->find_identifier($instanceId, $type, $value);
+            if ($identifier) return $this->contacts->get_by_id((int) $identifier['contact_id']);
+        }
+        return $this->contacts->find_by_phone($phone, $instanceId);
     }
 
     public function delete(int $id, int $actorId): void

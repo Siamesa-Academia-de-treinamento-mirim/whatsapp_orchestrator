@@ -45,6 +45,7 @@ class Chat_service
     private Webhook_normalizer $normalizer;
     private Payload_sanitizer $sanitizer;
     private BaseConnection $db;
+    private Provider_manager $providers;
     /** @var callable|null */
     private $clientFactory;
 
@@ -57,7 +58,8 @@ class Chat_service
         ?Webhook_normalizer $normalizer = null,
         ?Payload_sanitizer $sanitizer = null,
         ?BaseConnection $db = null,
-        ?callable $clientFactory = null
+        ?callable $clientFactory = null,
+        ?Provider_manager $providerManager = null
     ) {
         $this->instances = $instances ?? new Chat_instances_model();
         $this->conversations = $conversations ?? new Chat_conversations_model();
@@ -68,6 +70,7 @@ class Chat_service
         $this->sanitizer = $sanitizer ?? new Payload_sanitizer();
         $this->db = $db ?? db_connect('default');
         $this->clientFactory = $clientFactory;
+        $this->providers = $providerManager ?? new Provider_manager($this->instances, $this->settings, $clientFactory);
     }
 
     /** @return array{data:array<int,array<string,mixed>>,meta:array<string,mixed>} */
@@ -136,8 +139,9 @@ class Chat_service
             throw new InvalidArgumentException('Instancia nao encontrada.');
         }
 
-        $response = $this->clientForInstance($instance)->status();
-        $status = (string) ($response['connection_status'] ?? 'error');
+        $provider = $this->providers->forInstance($instance);
+        $response = $provider->status();
+        $status = (string) ($response['connection_status'] ?? (!empty($response['success']) ? 'connected' : 'error'));
         if (!in_array($status, ['connected', 'attention', 'disconnected', 'error'], true)) {
             $status = 'error';
         }
@@ -149,8 +153,8 @@ class Chat_service
             'status' => $status,
             'state' => $response['state'] ?? null,
             'message' => !empty($response['success'])
-                ? ($status === 'connected' ? 'Conexao com a Evolution confirmada.' : 'Estado da conexao atualizado.')
-                : (string) ($response['error'] ?? 'Nao foi possivel consultar a Evolution API.'),
+                ? ($status === 'connected' ? 'Conexao com o provedor confirmada.' : 'Estado da conexao atualizado.')
+                : (string) ($response['error'] ?? 'Nao foi possivel consultar o provedor WhatsApp.'),
             'http_status' => (int) ($response['status_code'] ?? 0),
         ];
     }
@@ -235,14 +239,16 @@ class Chat_service
     }
 
     /**
-     * Imports the current Evolution chat list into the local read model. This
-     * is intentionally called on demand (first load/channel change), not on
-     * every polling cycle.
+     * Imports the current Evolution chat list into the local read model. Meta
+     * Cloud is webhook-first and has no equivalent endpoint for enumerating a
+     * user's WhatsApp inbox, therefore those instances are intentionally
+     * skipped instead of being treated as synchronization failures.
      *
      * @return array{instances:int,chats:int,errors:int}
      */
-    public function sync_chats(?int $instanceId = null): array
+    public function sync_chats(?int $instanceId = null, int $limit = 100): array
     {
+        $limit = min(100, max(10, $limit));
         if ($instanceId !== null && $instanceId > 0) {
             $single = $this->instances->get_by_id($instanceId);
             $instanceRows = $single && !empty($single['active']) ? [$single] : [];
@@ -253,6 +259,10 @@ class Chat_service
 
         $summary = ['instances' => 0, 'chats' => 0, 'errors' => 0];
         foreach ($instanceRows as $instance) {
+            if (($instance['provider_type'] ?? 'evolution') !== 'evolution') {
+                continue;
+            }
+
             $syncLock = 'chat_sync_instance_' . (int) ($instance['id'] ?? 0);
             if (!$this->acquireNamedLock($syncLock, 0)) {
                 $summary['errors']++;
@@ -260,7 +270,11 @@ class Chat_service
             }
             try {
                 $client = $this->clientForInstance($instance);
-                $response = $client->find_chats([]);
+                $response = $client->find_chats([
+                    'page' => 1,
+                    // Evolution v2 calls the page size "offset" on chat queries.
+                    'offset' => $limit,
+                ]);
                 if (empty($response['success'])) {
                     $summary['errors']++;
                     continue;
@@ -309,7 +323,7 @@ class Chat_service
         $synced = 0;
         if ($sync) {
             try {
-                $synced = $this->sync_conversation_history($conversation);
+                $synced = $this->sync_conversation_history($conversation, $limit);
             } catch (Throwable $exception) {
                 $syncError = 'O historico remoto nao pode ser atualizado agora; exibindo os dados locais.';
                 log_message('error', 'Chatwoot_plugin history synchronization failed ({exception_type}).', [
@@ -345,7 +359,7 @@ class Chat_service
     }
 
     /** @param array<string,mixed> $conversation */
-    public function sync_conversation_history(array $conversation): int
+    public function sync_conversation_history(array $conversation, int $limit = 50): int
     {
         $conversationId = (int) ($conversation['id'] ?? 0);
         $syncLock = 'chat_sync_history_' . $conversationId;
@@ -354,19 +368,25 @@ class Chat_service
         }
 
         try {
-            return $this->syncConversationHistoryUnlocked($conversation);
+            return $this->syncConversationHistoryUnlocked($conversation, $limit);
         } finally {
             $this->releaseNamedLock($syncLock);
         }
     }
 
     /** @param array<string,mixed> $conversation */
-    private function syncConversationHistoryUnlocked(array $conversation): int
+    private function syncConversationHistoryUnlocked(array $conversation, int $limit): int
     {
         $instanceId = (int) ($conversation['instance_id'] ?? 0);
         $instance = $this->instances->get_by_id($instanceId);
         if (!$instance || empty($instance['active'])) {
             throw new RuntimeException('A instancia desta conversa esta inativa ou indisponivel.');
+        }
+        if (($instance['provider_type'] ?? 'evolution') !== 'evolution') {
+            // The official Cloud API does not expose an endpoint to fetch old
+            // message history. Messages arrive through signed webhooks and
+            // the local database is the canonical history for this channel.
+            return 0;
         }
 
         $remoteJid = trim((string) ($conversation['remote_jid'] ?? ''));
@@ -375,7 +395,12 @@ class Chat_service
         }
 
         $client = $this->clientForInstance($instance);
-        $response = $client->find_messages($remoteJid);
+        $limit = min(100, max(1, $limit));
+        $response = $client->find_messages($remoteJid, [
+            'page' => 1,
+            // Evolution v2 calls the page size "offset" on history queries.
+            'offset' => $limit,
+        ]);
         if (empty($response['success'])) {
             throw new RuntimeException((string) ($response['error'] ?? 'Falha ao consultar mensagens na Evolution.'));
         }
@@ -444,6 +469,9 @@ class Chat_service
         if ($text === '' || $clientMessageId === '') {
             throw new InvalidArgumentException('Mensagem e identificador idempotente sao obrigatorios.');
         }
+        if (mb_strlen($text) > 4096) {
+            throw new InvalidArgumentException('A mensagem excede o limite de 4096 caracteres.');
+        }
 
         $sendLock = 'chat_send_' . substr(hash('sha256', $conversationId . '|' . $clientMessageId), 0, 40);
         if (!$this->acquireNamedLock($sendLock, 0)) {
@@ -456,121 +484,130 @@ class Chat_service
                 return $this->mapMessage($existing);
             }
 
-        $ai = new Ai_service();
-        $stopCommand = trim((string) $this->settings->get_value('ai_stop_command', '@stop'));
-        $startCommand = trim((string) $this->settings->get_value('ai_start_command', '@start'));
-        if ($text === $startCommand) {
-            try { $ai->set_state($conversationId, ['status' => 'running', 'reason' => 'human_command_start', 'source' => 'rise_plugin'], $actorId, false); } catch (Throwable $exception) { /* Text delivery remains independent. */ }
-        } elseif ($text === $stopCommand) {
-            try { $ai->set_state($conversationId, ['status' => 'paused', 'reason' => 'human_command_stop', 'source' => 'rise_plugin'], $actorId, false); } catch (Throwable $exception) { /* Text delivery remains independent. */ }
-        } else {
-            $ai->pause_for_human($conversationId, $actorId);
-        }
-
-        $remoteJid = (string) $conversation['remote_jid'];
-        $number = (string) ($conversation['phone_number'] ?: $remoteJid);
-        if ($this->isLidJid($remoteJid)) {
-            $lidDigits = (string) preg_replace('/\D+/', '', explode('@', $remoteJid, 2)[0]);
-            $number = (string) preg_replace('/\D+/', '', $number);
-            if ($number === '' || $number === $lidDigits) {
-                throw new RuntimeException(
-                    'O numero real deste contato @lid ainda nao foi resolvido. Sincronize a conversa e tente novamente.'
-                );
+            $provider = $this->providers->forInstance($instance);
+            $capabilities = $provider->capabilities();
+            $providerName = $provider->name();
+            $remoteJid = trim((string) $conversation['remote_jid']);
+            $isGroup = $this->isGroupJid($remoteJid) || (string) ($conversation['conversation_type'] ?? '') === 'group';
+            if ($isGroup && empty($capabilities['supports_groups'])) {
+                throw new RuntimeException('O provedor oficial nao oferece envio para grupos. Use uma instancia Evolution para esta conversa.');
             }
-        }
-        $now = time();
-        $nowDate = gmdate('Y-m-d H:i:s', $now);
-        $dedupeKey = hash('sha256', implode('|', [
-            (string) $instance['id'],
-            $remoteJid,
-            'client',
-            $clientMessageId,
-        ]));
 
-        if ($existing) {
-            $messageId = (int) $existing['id'];
-            $this->messages->update_message($messageId, [
+            if ($providerName === 'meta_cloud') {
+                if ($isGroup) {
+                    throw new RuntimeException('A API oficial nao oferece conversas em grupo.');
+                }
+                $windowExpires = !empty($conversation['service_window_expires_at'])
+                    ? strtotime((string) $conversation['service_window_expires_at'])
+                    : false;
+                if (!$windowExpires || $windowExpires <= time()) {
+                    throw new RuntimeException('A janela de atendimento de 24 horas esta fechada. Envie um template oficial aprovado e aguarde a resposta do contato.');
+                }
+            }
+
+            $number = (string) ($conversation['phone_number'] ?: $remoteJid);
+            if ($this->isLidJid($remoteJid)) {
+                $lidDigits = (string) preg_replace('/\D+/', '', explode('@', $remoteJid, 2)[0]);
+                $number = (string) preg_replace('/\D+/', '', $number);
+                if ($number === '' || $number === $lidDigits) {
+                    throw new RuntimeException('O numero real deste contato @lid ainda nao foi resolvido. Sincronize a conversa e tente novamente.');
+                }
+            }
+            $recipient = $isGroup ? $remoteJid : $number;
+            $now = time();
+            $nowDate = gmdate('Y-m-d H:i:s', $now);
+            $dedupeKey = hash('sha256', implode('|', [(string) $instance['id'], $remoteJid, 'client', $clientMessageId]));
+
+            $messagePayload = [
                 'status' => 'sending',
                 'text_content' => $text,
                 'sent_at' => $nowDate,
                 'message_timestamp' => $now,
-            ]);
-        } else {
-            $messageId = $this->messages->upsert_message($conversationId, (int) $instance['id'], [
-                'external_message_id' => null,
-                'remote_jid' => $remoteJid,
-                'direction' => 'outgoing',
-                'message_type' => 'text',
-                'text_content' => $text,
-                'status' => 'sending',
-                'sent_at' => $nowDate,
-                'message_timestamp' => $now,
-                'dedupe_key' => $dedupeKey,
-                'client_message_id' => $clientMessageId,
-                'raw_payload' => ['source' => 'rise_ui'],
+                'provider_name' => $providerName,
+                'is_group_message' => $isGroup ? 1 : 0,
                 'sender_user_id' => $actorId ?: null,
+            ];
+            if ($existing) {
+                $messageId = (int) $existing['id'];
+                $this->messages->update_message($messageId, $messagePayload);
+            } else {
+                $messageId = $this->messages->upsert_message($conversationId, (int) $instance['id'], array_merge($messagePayload, [
+                    'external_message_id' => null,
+                    'remote_jid' => $remoteJid,
+                    'direction' => 'outgoing',
+                    'message_type' => 'text',
+                    'dedupe_key' => $dedupeKey,
+                    'client_message_id' => $clientMessageId,
+                    'raw_payload' => ['source' => 'rise_ui', 'provider' => $providerName],
+                ]));
+            }
+
+            $response = $provider->sendText($recipient, $text, [
+                'conversation_id' => $conversationId,
+                'client_message_id' => $clientMessageId,
             ]);
-        }
+            if (empty($response['success'])) {
+                $error = mb_substr((string) ($response['error'] ?? 'O provedor nao confirmou o envio.'), 0, 1000);
+                $this->messages->update_message($messageId, [
+                    'status' => 'failed',
+                    'delivery_error' => $error,
+                    'failed_at' => gmdate('Y-m-d H:i:s'),
+                ]);
+                try {
+                    (new Notification_service())->create('message_failed', 'Falha ao enviar mensagem', $error, 'conversation', $conversationId, $actorId ?: null, 'danger', 'send-failed|' . $conversationId . '|' . $clientMessageId);
+                } catch (Throwable $exception) { /* Provider failure remains primary. */ }
+                (new Audit_service())->record($actorId ?: null, 'message.send_failed', 'message', $messageId, (int) $instance['id'], [], ['error' => $error, 'provider' => $providerName]);
+                throw new RuntimeException($error);
+            }
 
-        $client = $this->clientForInstance($instance);
-        if ($this->isGroupJid($remoteJid)) {
-            $endpoint = (string) $this->settings->get_value(
-                Chat_settings_model::ENDPOINT_SEND_TEXT,
-                '/message/sendText/{instance}'
+            $externalId = trim((string) ($response['message_id'] ?? ''));
+            $this->finalizeOptimisticMessage(
+                $messageId,
+                $conversationId,
+                (int) $instance['id'],
+                $clientMessageId,
+                $externalId,
+                $remoteJid,
+                $response['data'] ?? [],
+                $providerName
             );
-            $instanceName = trim((string) ($instance['evolution_instance_name'] ?? ''));
-            if ($endpoint === '' || $instanceName === '') {
-                throw new RuntimeException('Endpoint de envio ou instancia Evolution nao configurado.');
+
+            $this->upsertConversationPreservingActivity((int) $instance['id'], $remoteJid, [
+                'last_message_preview' => $text,
+                'last_message_at' => $nowDate,
+                'last_human_message_at' => $actorId > 0 ? $nowDate : null,
+            ], $now);
+
+            if ($actorId > 0 && (int) $this->settings->get_value('bot_pause_on_human_message', 1) === 1) {
+                try {
+                    (new Bot_service())->pauseConversation($conversationId, $actorId, 'human_reply');
+                } catch (Throwable $exception) {
+                    log_message('error', 'Could not pause deterministic bot after human reply: {message}', [
+                        'message' => $exception->getMessage(),
+                    ]);
+                }
             }
-            $path = str_replace('{instance}', rawurlencode($instanceName), $endpoint);
-            $response = $client->post($path, ['number' => $remoteJid, 'text' => $text]);
-            if (!empty($response['success']) && empty($response['message_id'])) {
-                $response['message_id'] = $client->extract_message_id($response['data'] ?? []);
+
+            if ($actorId > 0 && empty($conversation['first_response_at'])) {
+                $firstIncoming = $this->db->table('chat_messages')->select('message_timestamp')->where('conversation_id', $conversationId)->where('direction', 'incoming')->where('deleted', 0)->orderBy('message_timestamp', 'ASC')->get(1)->getRowArray();
+                if ($firstIncoming && (int) $firstIncoming['message_timestamp'] > 0) {
+                    $seconds = max(0, $now - (int) $firstIncoming['message_timestamp']);
+                    $this->conversations->upsert_conversation((int) $instance['id'], $remoteJid, ['first_response_at' => $nowDate, 'first_response_seconds' => $seconds]);
+                }
             }
-        } else {
-            $response = $client->send_text($number, $text);
-        }
-        if (empty($response['success'])) {
-            $error = mb_substr((string) ($response['error'] ?? 'A Evolution API nao confirmou o envio.'), 0, 1000);
-            $this->messages->update_message($messageId, ['status' => 'failed', 'delivery_error' => $error, 'failed_at' => gmdate('Y-m-d H:i:s')]);
-            try { (new Notification_service())->create('message_failed', 'Falha ao enviar mensagem', $error, 'conversation', $conversationId, $actorId ?: null, 'danger', 'send-failed|' . $conversationId . '|' . $clientMessageId); } catch (Throwable $exception) { /* Do not mask provider error. */ }
-            (new Audit_service())->record($actorId ?: null, 'message.send_failed', 'message', $messageId, (int) $instance['id'], [], ['error' => $error]);
-            throw new RuntimeException((string) ($response['error'] ?? 'A Evolution API nao confirmou o envio.'));
-        }
 
-        $externalId = trim((string) ($response['message_id'] ?? ''));
-        $this->finalizeOptimisticMessage(
-            $messageId,
-            $conversationId,
-            (int) $instance['id'],
-            $clientMessageId,
-            $externalId,
-            $remoteJid,
-            $response['data'] ?? []
-        );
-
-        $this->upsertConversationPreservingActivity((int) $instance['id'], $remoteJid, [
-            'last_message_preview' => $text,
-            'last_message_at' => $nowDate,
-            'last_human_message_at' => $nowDate,
-        ], $now);
-
-        if (empty($conversation['first_response_at'])) {
-            $firstIncoming = $this->db->table('chat_messages')->select('message_timestamp')->where('conversation_id', $conversationId)->where('direction', 'incoming')->where('deleted', 0)->orderBy('message_timestamp', 'ASC')->get(1)->getRowArray();
-            if ($firstIncoming && (int) $firstIncoming['message_timestamp'] > 0) {
-                $seconds = max(0, $now - (int) $firstIncoming['message_timestamp']);
-                $this->conversations->upsert_conversation((int) $instance['id'], $remoteJid, ['first_response_at' => $nowDate, 'first_response_seconds' => $seconds]);
+            $saved = $this->messages->find_by_client_message_id($conversationId, $clientMessageId)
+                ?? ($externalId !== '' ? $this->messages->find_by_external_id((int) $instance['id'], $externalId) : null)
+                ?? $this->messages->get_by_id($messageId);
+            if (!$saved) {
+                throw new RuntimeException('A mensagem enviada nao pode ser relida.');
             }
-        }
 
-        $saved = $this->messages->find_by_client_message_id($conversationId, $clientMessageId)
-            ?? ($externalId !== '' ? $this->messages->find_by_external_id((int) $instance['id'], $externalId) : null)
-            ?? $this->messages->get_by_id($messageId);
-        if (!$saved) {
-            throw new RuntimeException('A mensagem enviada nao pode ser relida.');
-        }
-
-        (new Audit_service())->record($actorId ?: null, 'message.sent', 'message', (int) $saved['id'], (int) $instance['id'], [], ['conversation_id' => $conversationId, 'status' => $saved['status'] ?? 'sent']);
+            (new Audit_service())->record($actorId ?: null, 'message.sent', 'message', (int) $saved['id'], (int) $instance['id'], [], [
+                'conversation_id' => $conversationId,
+                'status' => $saved['status'] ?? 'sent',
+                'provider' => $providerName,
+            ]);
 
             return $this->mapMessage($saved);
         } finally {
@@ -578,71 +615,133 @@ class Chat_service
         }
     }
 
+    /** Sends an approved official template. This is the only allowed outbound
+     * entry point when the Meta customer-service window is closed. */
+    public function send_template(
+        int $conversationId,
+        string $templateName,
+        string $languageCode,
+        array $components,
+        string $clientMessageId,
+        int $actorId = 0
+    ): array {
+        $conversation = $this->conversations->get_by_id($conversationId);
+        if (!$conversation) throw new InvalidArgumentException('Conversa nao encontrada.');
+        $instance = $this->instances->get_by_id((int) $conversation['instance_id']);
+        if (!$instance || empty($instance['active'])) throw new RuntimeException('Instancia inativa.');
+        $provider = $this->providers->forInstance($instance);
+        if (empty($provider->capabilities()['supports_templates'])) {
+            throw new RuntimeException('Esta instancia nao suporta templates oficiais.');
+        }
+        $phone = (string) preg_replace('/\D+/', '', (string) ($conversation['phone_number'] ?: $conversation['remote_jid']));
+        if ($phone === '') throw new RuntimeException('Contato sem numero oficial resolvido.');
+        $clientMessageId = trim($clientMessageId);
+        if ($clientMessageId === '') throw new InvalidArgumentException('Identificador idempotente obrigatorio.');
+        $existing = $this->messages->find_by_client_message_id($conversationId, $clientMessageId);
+        if ($existing && in_array((string) ($existing['status'] ?? ''), ['sent','delivered','read'], true)) return $this->mapMessage($existing);
+
+        $response = $provider->sendTemplate($phone, trim($templateName), trim($languageCode), $components, ['conversation_id' => $conversationId]);
+        if (empty($response['success'])) throw new RuntimeException((string) ($response['error'] ?? 'A API oficial nao confirmou o template.'));
+        $now = time();
+        $externalId = trim((string) ($response['message_id'] ?? ''));
+        $messageId = $this->messages->upsert_message($conversationId, (int) $instance['id'], [
+            'external_message_id' => $externalId !== '' ? $externalId : null,
+            'remote_jid' => (string) $conversation['remote_jid'],
+            'direction' => 'outgoing',
+            'message_type' => 'template',
+            'text_content' => '[Template] ' . trim($templateName),
+            'status' => 'sent',
+            'sent_at' => gmdate('Y-m-d H:i:s', $now),
+            'message_timestamp' => $now,
+            'dedupe_key' => $externalId !== '' ? Chat_messages_model::build_dedupe_key((int) $instance['id'], (string) $conversation['remote_jid'], $externalId, $now) : hash('sha256', 'template|' . $conversationId . '|' . $clientMessageId),
+            'client_message_id' => $clientMessageId,
+            'provider_name' => $provider->name(),
+            'provider_payload_id' => $externalId !== '' ? $externalId : null,
+            'raw_payload' => $this->sanitizer->sanitize(['source' => 'official_template', 'template' => $templateName, 'language' => $languageCode, 'response' => $response['data'] ?? []]),
+            'sender_user_id' => $actorId ?: null,
+        ]);
+        $this->upsertConversationPreservingActivity((int) $instance['id'], (string) $conversation['remote_jid'], [
+            'last_message_preview' => '[Template] ' . trim($templateName),
+            'last_message_at' => gmdate('Y-m-d H:i:s', $now),
+            'last_human_message_at' => $actorId > 0 ? gmdate('Y-m-d H:i:s', $now) : null,
+        ], $now);
+        if ($actorId > 0 && (int) $this->settings->get_value('bot_pause_on_human_message', 1) === 1) {
+            try {
+                (new Bot_service())->pauseConversation($conversationId, $actorId, 'human_template');
+            } catch (Throwable $exception) {
+                log_message('error', 'Could not pause deterministic bot after human template: {message}', [
+                    'message' => $exception->getMessage(),
+                ]);
+            }
+        }
+        $saved = $this->messages->get_by_id($messageId);
+        if (!$saved) throw new RuntimeException('Template enviado nao pode ser relido.');
+        return $this->mapMessage($saved);
+    }
+
     /** @return array<string,mixed> */
     public function public_settings(): array
     {
         $globalKey = (string) $this->settings->get_value(self::SETTING_GLOBAL_API_KEY, '');
         $webhookSecret = (string) $this->settings->get_value(Chat_settings_model::WEBHOOK_SECRET, '');
-        $n8nToken = (string) $this->settings->get_value('n8n_token', '');
 
         $result = [
             'evolution_base_url' => (string) $this->settings->get_value(self::SETTING_BASE_URL, ''),
             'global_api_key_masked' => $this->maskSecret($globalKey),
             'has_global_api_key' => $globalKey !== '',
-            'request_timeout_seconds' => (int) $this->settings->get_value(
-                Chat_settings_model::EVOLUTION_TIMEOUT_SECONDS,
-                30
-            ),
-            'polling_interval_ms' => (int) $this->settings->get_value(
-                Chat_settings_model::POLLING_INTERVAL_MS,
-                5000
-            ),
+            'request_timeout_seconds' => (int) $this->settings->get_value(Chat_settings_model::EVOLUTION_TIMEOUT_SECONDS, 30),
+            'polling_interval_ms' => (int) $this->settings->get_value(Chat_settings_model::POLLING_INTERVAL_MS, 5000),
             'webhook_secret_masked' => $this->maskSecret($webhookSecret),
             'has_webhook_secret' => $webhookSecret !== '',
-            'connection_status_path' => (string) $this->settings->get_value(
-                Chat_settings_model::ENDPOINT_CONNECTION_STATE,
-                '/instance/connectionState/{instance}'
-            ),
-            'find_chats_path' => (string) $this->settings->get_value(
-                Chat_settings_model::ENDPOINT_FIND_CHATS,
-                '/chat/findChats/{instance}'
-            ),
-            'find_messages_path' => (string) $this->settings->get_value(
-                Chat_settings_model::ENDPOINT_FIND_MESSAGES,
-                '/chat/findMessages/{instance}'
-            ),
-            'send_text_path' => (string) $this->settings->get_value(
-                Chat_settings_model::ENDPOINT_SEND_TEXT,
-                '/message/sendText/{instance}'
-            ),
+            'connection_status_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_CONNECTION_STATE, '/instance/connectionState/{instance}'),
+            'find_chats_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_FIND_CHATS, '/chat/findChats/{instance}'),
+            'find_messages_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_FIND_MESSAGES, '/chat/findMessages/{instance}'),
+            'send_text_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_SEND_TEXT, '/message/sendText/{instance}'),
             'send_media_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_SEND_MEDIA, '/message/sendMedia/{instance}'),
             'send_audio_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_SEND_AUDIO, '/message/sendWhatsAppAudio/{instance}'),
             'get_media_base64_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_MEDIA_BASE64, '/chat/getBase64FromMediaMessage/{instance}'),
-            'n8n_token_masked' => $this->maskSecret($n8nToken),
-            'has_n8n_token' => $n8nToken !== '',
         ];
 
         $defaults = [
-            'module_name' => 'Impulso Hub', 'timezone' => 'America/Sao_Paulo', 'conversation_page_size' => 30,
-            'sound_enabled' => 1, 'browser_notifications_enabled' => 0, 'auto_mark_read' => 1,
-            'default_status' => 'open', 'default_priority' => 'normal', 'sla_minutes' => 30, 'auto_resolve_hours' => 0,
-            'evolution_retries' => 2, 'n8n_base_url' => '', 'n8n_auth_mode' => 'bearer', 'n8n_header_name' => 'X-API-Key', 'n8n_allow_private_networks' => 0, 'n8n_timeout_seconds' => 30,
-            'n8n_health_path' => '/healthz', 'n8n_campaigns_path' => '/webhook/campanha', 'n8n_ai_path' => '/webhook/iara/control', 'n8n_events_path' => '/webhook/impulso/events',
-            'campaign_window_start' => '08:00', 'campaign_window_end' => '20:00', 'campaign_batch_size' => 20,
-            'campaign_min_interval_seconds' => 8, 'campaign_pause_after_errors' => 5, 'campaign_optout_text' => '', 'quick_replies_json' => '[]',
-            'ai_default_state' => 'running', 'ai_human_priority' => 1, 'ai_show_context' => 1, 'ai_stop_command' => '@stop', 'ai_start_command' => '@start', 'ai_auto_return_minutes' => 0,
-            'log_sanitized_webhooks' => 1, 'webhook_retention_days' => 30, 'audit_enabled' => 1, 'audit_retention_days' => 180,
-            'conversation_retention_days' => 0, 'media_retention_days' => 30, 'secure_media' => 1,
+            'module_name' => 'Impulso Hub WhatsApp',
+            'timezone' => 'America/Sao_Paulo',
+            'conversation_page_size' => 30,
+            'sound_enabled' => 1,
+            'browser_notifications_enabled' => 0,
+            'auto_mark_read' => 1,
+            'default_status' => 'open',
+            'default_priority' => 'normal',
+            'auto_resolve_hours' => 0,
+            'evolution_retries' => 2,
+            'campaign_window_start' => '08:00',
+            'campaign_window_end' => '20:00',
+            'campaign_default_rate_limit_per_minute' => 20,
+            'campaign_recipient_max_attempts' => 5,
+            'campaign_retry_delay_seconds' => 120,
+            'campaign_pause_after_errors' => 5,
+            'quick_replies_json' => '[]',
+            'bot_enabled' => 1,
+            'bot_session_timeout_minutes' => 1440,
+            'bot_default_fallback' => 'Não consegui identificar sua dúvida com segurança. Vou encaminhar sua mensagem para um responsável.',
+            'bot_default_handoff' => 'Sua mensagem foi encaminhada para um responsável, que continuará o atendimento.',
+            'log_sanitized_webhooks' => 1,
+            'webhook_retention_days' => 30,
+            'conversation_retention_days' => 0,
+            'media_retention_days' => 30,
+            'secure_media' => 1,
         ];
-        $integerKeys = ['conversation_page_size','sound_enabled','browser_notifications_enabled','auto_mark_read','sla_minutes','auto_resolve_hours','evolution_retries','n8n_allow_private_networks','n8n_timeout_seconds','campaign_batch_size','campaign_min_interval_seconds','campaign_pause_after_errors','ai_human_priority','ai_show_context','ai_auto_return_minutes','log_sanitized_webhooks','webhook_retention_days','audit_enabled','audit_retention_days','conversation_retention_days','media_retention_days','secure_media'];
+        $integerKeys = [
+            'conversation_page_size', 'sound_enabled', 'browser_notifications_enabled', 'auto_mark_read',
+            'auto_resolve_hours', 'evolution_retries', 'campaign_default_rate_limit_per_minute',
+            'campaign_recipient_max_attempts', 'campaign_retry_delay_seconds', 'campaign_pause_after_errors',
+            'bot_enabled', 'bot_session_timeout_minutes', 'log_sanitized_webhooks', 'webhook_retention_days',
+            'conversation_retention_days', 'media_retention_days', 'secure_media',
+        ];
         foreach ($defaults as $key => $default) {
             $value = $this->settings->get_value($key, $default);
             $result[$key] = in_array($key, $integerKeys, true) ? (int) $value : (string) $value;
         }
-        // Backwards-compatible view aliases.
-        $result['campaign_start_time'] = $result['campaign_window_start'];
-        $result['campaign_end_time'] = $result['campaign_window_end'];
-        $result['ai_return_minutes'] = $result['ai_auto_return_minutes'];
+
         return $result;
     }
 
@@ -657,11 +756,7 @@ class Chat_service
 
         $connected = (int) ($this->instances->count_by_status(true)['connected'] ?? 0);
 
-        $slaMinutes = max(1, (int) $this->settings->get_value('sla_minutes', 30));
-        $slaThreshold = gmdate('Y-m-d H:i:s', time() - $slaMinutes * 60);
         $avgFirst = $this->db->table($conversationTable)->select('COALESCE(AVG(first_response_seconds),0) average', false)->where('deleted', 0)->where('first_response_seconds IS NOT NULL', null, false)->get()->getRowArray();
-        $resolved = $this->db->table($conversationTable)->where('deleted', 0)->where('status', 'resolved')->countAllResults();
-        $aiResolved = $this->db->table($conversationTable)->where('deleted', 0)->where('status', 'resolved')->where('last_bot_message_at IS NOT NULL', null, false)->groupStart()->where('last_human_message_at IS NULL', null, false)->orWhere('last_bot_message_at > last_human_message_at', null, false)->groupEnd()->countAllResults();
         $avgSeconds = (int) ($avgFirst['average'] ?? 0);
 
         return [
@@ -669,7 +764,6 @@ class Chat_service
             'pending' => $base($this->db, $conversationTable)->where('status', 'pending')->countAllResults(),
             'high_priority' => $base($this->db, $conversationTable)->whereIn('status', ['open', 'pending'])->whereIn('priority', ['high', 'urgent'])->countAllResults(),
             'unassigned' => $base($this->db, $conversationTable)->where('assignee_id IS NULL', null, false)->whereIn('status', ['open', 'pending'])->countAllResults(),
-            'sla_risk' => $base($this->db, $conversationTable)->whereIn('status', ['open', 'pending'])->where('first_response_at IS NULL', null, false)->where('created_at <=', $slaThreshold)->countAllResults(),
             'resolved_today' => $this->db->table($conversationTable)
                 ->where('deleted', 0)
                 ->where('status', 'resolved')
@@ -677,7 +771,6 @@ class Chat_service
                 ->countAllResults(),
             'avg_first_response' => $avgSeconds > 0 ? ($avgSeconds < 60 ? $avgSeconds . 's' : round($avgSeconds / 60, 1) . ' min') : '—',
             'online_agents' => 0,
-            'ai_resolution_rate' => ($resolved > 0 ? round($aiResolved * 100 / $resolved, 1) : 0) . '%',
             'connected_instances' => $connected,
         ];
     }
@@ -713,14 +806,6 @@ class Chat_service
             }
         }
 
-        $currentN8nBase = trim((string) $this->settings->get_value('n8n_base_url', ''));
-        $nextN8nBase = trim((string) ($values['n8n_base_url'] ?? ''));
-        $nextN8nToken = trim((string) ($values['n8n_token'] ?? ''));
-        if ($nextN8nBase !== '' && !$this->sameOrigin($currentN8nBase, $nextN8nBase)
-            && trim((string) $this->settings->get_value('n8n_token', '')) !== '' && $nextN8nToken === '') {
-            throw new InvalidArgumentException('Ao alterar a origem do n8n, informe novamente o token de integracao.');
-        }
-
         $plain = [
             self::SETTING_BASE_URL => $nextBaseUrl,
             Chat_settings_model::EVOLUTION_TIMEOUT_SECONDS => (string) ($values['request_timeout_seconds'] ?? 30),
@@ -734,24 +819,22 @@ class Chat_service
             Chat_settings_model::ENDPOINT_MEDIA_BASE64 => (string) ($values['get_media_base64_path'] ?? '/chat/getBase64FromMediaMessage/{instance}'),
         ];
         $plainMap = [
-            'module_name','timezone','conversation_page_size','sound_enabled','browser_notifications_enabled','auto_mark_read','default_status','default_priority','sla_minutes','auto_resolve_hours','evolution_retries',
-            'n8n_base_url','n8n_auth_mode','n8n_header_name','n8n_allow_private_networks','n8n_timeout_seconds','n8n_health_path','n8n_campaigns_path','n8n_ai_path','n8n_events_path',
-            'campaign_window_start','campaign_window_end','campaign_batch_size','campaign_min_interval_seconds','campaign_pause_after_errors','campaign_optout_text','quick_replies_json',
-            'ai_default_state','ai_human_priority','ai_show_context','ai_stop_command','ai_start_command','ai_auto_return_minutes',
-            'log_sanitized_webhooks','webhook_retention_days','audit_enabled','audit_retention_days','conversation_retention_days','media_retention_days','secure_media',
+            'module_name', 'timezone', 'conversation_page_size', 'sound_enabled',
+            'browser_notifications_enabled', 'auto_mark_read', 'default_status', 'default_priority',
+            'auto_resolve_hours', 'evolution_retries', 'campaign_window_start', 'campaign_window_end',
+            'campaign_default_rate_limit_per_minute', 'campaign_recipient_max_attempts',
+            'campaign_retry_delay_seconds', 'campaign_pause_after_errors', 'quick_replies_json',
+            'bot_enabled', 'bot_session_timeout_minutes', 'bot_default_fallback', 'bot_default_handoff',
+            'log_sanitized_webhooks', 'webhook_retention_days', 'conversation_retention_days',
+            'media_retention_days', 'secure_media',
         ];
         foreach ($plainMap as $key) {
-            if (array_key_exists($key, $values)) {
-                $plain[$key] = (string) $values[$key];
-            }
+            if (array_key_exists($key, $values)) $plain[$key] = (string) $values[$key];
         }
-        foreach ($plain as $key => $value) {
-            $this->settings->upsert_setting($key, $value, false);
-        }
+        foreach ($plain as $key => $value) $this->settings->upsert_setting($key, $value, false);
 
-        $globalKey = $nextGlobalKey;
-        if ($globalKey !== '') {
-            $this->settings->upsert_setting(self::SETTING_GLOBAL_API_KEY, $globalKey, true);
+        if ($nextGlobalKey !== '') {
+            $this->settings->upsert_setting(self::SETTING_GLOBAL_API_KEY, $nextGlobalKey, true);
         } elseif (!empty($values['clear_global_api_key'])) {
             $this->settings->delete_setting(self::SETTING_GLOBAL_API_KEY);
         }
@@ -762,17 +845,10 @@ class Chat_service
             $this->settings->delete_setting(Chat_settings_model::WEBHOOK_SECRET);
         }
 
-        if ($nextN8nToken !== '') {
-            $this->settings->upsert_setting('n8n_token', $nextN8nToken, true);
-        } elseif (!empty($values['clear_n8n_token'])) {
-            $this->settings->delete_setting('n8n_token');
-        }
-
         (new Audit_service())->record($actorId ?: null, 'settings.updated', 'settings', null, null, [], [
-            'keys' => array_values(array_diff(array_keys($values), ['global_api_key', 'webhook_secret', 'n8n_token'])),
-            'global_api_key_changed' => $globalKey !== '' || !empty($values['clear_global_api_key']),
+            'keys' => array_values(array_diff(array_keys($values), ['global_api_key', 'webhook_secret'])),
+            'global_api_key_changed' => $nextGlobalKey !== '' || !empty($values['clear_global_api_key']),
             'webhook_secret_changed' => $webhookSecret !== '' || !empty($values['clear_webhook_secret']),
-            'n8n_token_changed' => $nextN8nToken !== '' || !empty($values['clear_n8n_token']),
         ]);
 
         return $this->public_settings();
@@ -804,7 +880,7 @@ class Chat_service
     }
 
     /**
-     * Processes one Evolution/n8n envelope. Authentication and batch splitting
+     * Processes one provider-normalized webhook event. Authentication and batch splitting
      * are controller responsibilities so this method is easy to unit test.
      *
      * @return array<string,mixed>
@@ -961,6 +1037,15 @@ class Chat_service
                 throw new InvalidArgumentException('Status de mensagem nao suportado.');
             }
 
+            // Delivery receipts also advance internal campaign recipients.
+            // This call is intentionally safe when the external ID does not
+            // belong to a campaign.
+            (new Campaign_dispatch_service())->updateDeliveryStatus(
+                $externalId,
+                $status,
+                isset($normalized['delivery_error']) ? (string) $normalized['delivery_error'] : null
+            );
+
             $message = $this->messages->find_by_external_id((int) $instance['id'], $externalId);
             if (!$message) {
                 throw new RuntimeException('Mensagem ainda nao encontrada; atualizacao mantida pendente.');
@@ -970,7 +1055,7 @@ class Chat_service
             $updated = false;
             if ($this->shouldAdvanceMessageStatus($previousStatus, $status)) {
                 $updatePayload = ['status' => $status];
-                if ($status === 'failed') { $updatePayload['failed_at'] = gmdate('Y-m-d H:i:s'); $updatePayload['delivery_error'] = 'Falha reportada pela Evolution.'; }
+                if ($status === 'failed') { $updatePayload['failed_at'] = gmdate('Y-m-d H:i:s'); $updatePayload['delivery_error'] = mb_substr(trim((string) ($normalized['delivery_error'] ?? 'Falha reportada pelo provedor.')), 0, 1000); }
                 $updated = $this->messages->update_message((int) $message['id'], $updatePayload);
                 if (!$updated || $this->db->affectedRows() < 1) {
                     throw new RuntimeException('Atualizacao de status nao afetou a mensagem; evento mantido pendente.');
@@ -1025,6 +1110,7 @@ class Chat_service
                 : hash('sha256', $normalizerKey !== '' ? $normalizerKey : implode('|', [
                     (string) $instanceId,
                     $remoteJid,
+                    (string) ($normalized['sender_jid'] ?? ''),
                     $externalId,
                     (string) $timestamp,
                 ]));
@@ -1033,15 +1119,41 @@ class Chat_service
                 ? $this->messages->find_by_external_id($instanceId, $externalId)
                 : $this->messages->find_by_dedupe_key($instanceId, $dedupeKey);
             $existingConversation = $this->conversations->get_by_remote_jid($instanceId, $remoteJid);
-
-            $conversationData = [];
-            $phone = trim((string) ($normalized['phone_number'] ?? ''));
-            $name = trim((string) ($normalized['contact_name'] ?? ''));
-            if ($phone !== '') {
-                $conversationData['phone_number'] = $phone;
+            $fromMe = !empty($normalized['from_me']);
+            $isGroup = !empty($normalized['is_group']) || $this->isGroupJid($remoteJid);
+            $providerName = strtolower(trim((string) ($normalized['provider_name'] ?? $instance['provider_type'] ?? 'evolution')));
+            if (!in_array($providerName, ['evolution', 'meta_cloud'], true)) {
+                $providerName = (string) ($instance['provider_type'] ?? 'evolution');
             }
-            if ($name !== '') {
-                $conversationData['contact_name'] = $name;
+
+            $groupIdentity = null;
+            if ($isGroup) {
+                $groupIdentity = (new Group_service())->resolve_message_identity($instanceId, $normalized);
+            }
+
+            $conversationData = [
+                'conversation_type' => $isGroup ? 'group' : 'individual',
+            ];
+            if ($isGroup) {
+                $conversationData['group_id'] = (int) ($groupIdentity['group_id'] ?? 0) ?: null;
+                $groupName = trim((string) ($normalized['group_name'] ?? $normalized['contact_name'] ?? ''));
+                if ($groupName !== '') {
+                    $conversationData['contact_name'] = mb_substr($groupName, 0, 191);
+                }
+                // Group JIDs are not telephone contacts.
+                $conversationData['phone_number'] = null;
+                $conversationData['contact_id'] = null;
+            } else {
+                $phone = trim((string) ($normalized['phone_number'] ?? ''));
+                if ($phone !== '') {
+                    $conversationData['phone_number'] = $phone;
+                }
+                // Outgoing pushName belongs to the connected account and may
+                // never overwrite the customer identity.
+                $name = !$fromMe ? trim((string) ($normalized['contact_name'] ?? '')) : '';
+                if ($name !== '') {
+                    $conversationData['contact_name'] = mb_substr($name, 0, 191);
+                }
             }
 
             $currentActivity = $existingConversation && !empty($existingConversation['last_message_at'])
@@ -1051,9 +1163,16 @@ class Chat_service
                 $conversationData['last_message_preview'] = $this->messagePreview($normalized);
                 $conversationData['last_message_at'] = $sentAt;
             }
+            if (!$fromMe) {
+                $conversationData['last_customer_message_at'] = $sentAt;
+                if ($providerName === 'meta_cloud') {
+                    $hours = min(24, max(1, (int) $this->settings->get_value('meta_service_window_hours', 24)));
+                    $conversationData['service_window_expires_at'] = gmdate('Y-m-d H:i:s', $timestamp + ($hours * 3600));
+                }
+            }
 
             $messageStatus = strtolower(trim((string) (
-                $normalized['message_status'] ?? (!empty($normalized['from_me']) ? 'sent' : 'received')
+                $normalized['message_status'] ?? ($fromMe ? 'sent' : 'received')
             )));
             if ($existingMessage) {
                 $existingStatus = strtolower(trim((string) ($existingMessage['status'] ?? '')));
@@ -1072,24 +1191,32 @@ class Chat_service
             $transactionOpen = true;
             try {
                 $conversationId = $this->conversations->upsert_conversation($instanceId, $remoteJid, $conversationData);
+                $messageType = $this->allowedMessageType((string) ($normalized['message_type'] ?? 'text'));
                 $messageId = $this->messages->upsert_message($conversationId, $instanceId, [
                     'external_message_id' => $externalId !== '' ? $externalId : null,
                     'remote_jid' => $remoteJid,
-                    'direction' => !empty($normalized['from_me']) ? 'outgoing' : 'incoming',
-                    'message_type' => $this->allowedMessageType((string) ($normalized['message_type'] ?? 'text')),
+                    'direction' => $fromMe ? 'outgoing' : 'incoming',
+                    'message_type' => $messageType,
                     'text_content' => $this->boundedText((string) ($normalized['text'] ?? '')),
                     'media_url' => $this->safeMediaUrl($normalized['media_url'] ?? null),
                     'mime_type' => $this->safeMimeType($normalized['mime_type'] ?? null),
-                    'caption' => in_array($this->allowedMessageType((string) ($normalized['message_type'] ?? 'text')), ['image','audio','video','document'], true) ? $this->boundedText((string) ($normalized['text'] ?? ''), 4096) : null,
+                    'caption' => in_array($messageType, ['image','audio','video','document'], true) ? $this->boundedText((string) ($normalized['text'] ?? ''), 4096) : null,
                     'file_name' => isset($normalized['file_name']) ? $this->boundedText((string) $normalized['file_name'], 255) : null,
                     'status' => $messageStatus,
                     'sent_at' => $sentAt,
                     'message_timestamp' => $timestamp,
                     'dedupe_key' => $dedupeKey,
-                    'raw_payload' => $this->sanitizer->sanitize($raw),
+                    'raw_payload' => $this->messageRawPayload($raw, $messageType, $providerName, $normalized),
+                    'sender_jid' => $isGroup ? (string) ($groupIdentity['sender_jid'] ?? '') : (string) ($normalized['sender_jid'] ?? ''),
+                    'sender_phone' => $isGroup ? (string) ($groupIdentity['sender_phone'] ?? '') : (string) ($normalized['sender_phone'] ?? ''),
+                    'sender_name' => $isGroup ? (string) ($groupIdentity['sender_name'] ?? '') : (!$fromMe ? (string) ($normalized['sender_name'] ?? $normalized['contact_name'] ?? '') : ''),
+                    'sender_contact_id' => $isGroup && !empty($groupIdentity['contact_id']) ? (int) $groupIdentity['contact_id'] : null,
+                    'is_group_message' => $isGroup ? 1 : 0,
+                    'provider_name' => $providerName,
+                    'provider_payload_id' => $externalId !== '' ? $externalId : null,
                 ]);
 
-                if (!$existingMessage && $incrementUnread && empty($normalized['from_me'])) {
+                if (!$existingMessage && $incrementUnread && !$fromMe) {
                     if (!$this->conversations->increment_unread($conversationId)) {
                         throw new RuntimeException('Nao foi possivel atualizar o contador da conversa.');
                     }
@@ -1111,18 +1238,38 @@ class Chat_service
                 throw new RuntimeException('Mensagem persistida nao encontrada.');
             }
 
-            try {
-                $contact = (new Contact_service())->resolve_for_message($instanceId, $normalized, $conversationId);
-                if (!empty($contact['id'])) {
-                    $this->conversations->upsert_conversation($instanceId, $remoteJid, ['contact_id' => (int) $contact['id']]);
+            if (!$isGroup) {
+                try {
+                    $contact = (new Contact_service())->resolve_for_message($instanceId, $normalized, $conversationId);
+                    if (!empty($contact['id'])) {
+                        $this->conversations->upsert_conversation($instanceId, $remoteJid, ['contact_id' => (int) $contact['id']]);
+                    }
+                } catch (Throwable $exception) {
+                    log_message('error', 'Chatwoot_plugin could not link message contact ({exception_type}).', ['exception_type' => get_class($exception)]);
                 }
-            } catch (Throwable $exception) {
-                log_message('error', 'Chatwoot_plugin could not link message contact ({exception_type}).', ['exception_type' => get_class($exception)]);
             }
-            if (!$existingMessage && $incrementUnread && empty($normalized['from_me'])) {
+            if (!$existingMessage && $incrementUnread && !$fromMe) {
+                if (!$isGroup) {
+                    try {
+                        (new Campaign_dispatch_service())->markLatestRecipientReplied(
+                            $instanceId,
+                            (string) ($normalized['phone_number'] ?? '')
+                        );
+                    } catch (Throwable $exception) {
+                        log_message('warning', 'Could not correlate campaign reply ({exception_type}).', ['exception_type' => get_class($exception)]);
+                    }
+                }
                 try {
                     (new Notification_service())->create('message', 'Nova mensagem', $this->messagePreview($normalized), 'conversation', $conversationId, null, 'info', 'incoming|' . $instanceId . '|' . ($externalId ?: $dedupeKey));
                 } catch (Throwable $exception) { /* Notification failure must not break webhook processing. */ }
+                try {
+                    (new Integration_job_service())->enqueue('bot_process', [
+                        'conversation_id' => $conversationId,
+                        'message_id' => $messageId,
+                    ], 3, 'bot-message-' . $messageId);
+                } catch (Throwable $exception) {
+                    log_message('warning', 'Could not enqueue deterministic bot ({exception_type}).', ['exception_type' => get_class($exception)]);
+                }
             }
 
             return $saved;
@@ -1138,12 +1285,14 @@ class Chat_service
         string $clientMessageId,
         string $externalId,
         string $remoteJid,
-        $rawResponse
+        $rawResponse,
+        string $providerName = 'evolution'
     ): void {
         $payload = [
             'status' => 'sent',
+            'provider_name' => $providerName,
             'raw_payload' => $this->sanitizer->sanitize([
-                'source' => 'evolution_send_text',
+                'source' => $providerName . '_send_text',
                 'response' => $rawResponse,
             ]),
         ];
@@ -1487,8 +1636,16 @@ class Chat_service
             'assignee' => (string) ($row['_assignee_name'] ?? ''),
             'team_id' => isset($row['team_id']) ? (int) $row['team_id'] : null,
             'resolved_at' => $this->toIsoDate($row['resolved_at'] ?? null),
-            'ai_status' => (string) ($row['ai_status'] ?? 'running'),
-            'ai_summary' => (string) ($row['ai_summary'] ?? ''),
+            'conversation_type' => (string) ($row['conversation_type'] ?? ($this->isGroupJid((string) ($row['remote_jid'] ?? '')) ? 'group' : 'individual')),
+            'is_group' => (string) ($row['conversation_type'] ?? '') === 'group' || $this->isGroupJid((string) ($row['remote_jid'] ?? '')),
+            'group_id' => isset($row['group_id']) ? (int) $row['group_id'] : null,
+            'provider_name' => (string) ($instance['provider_type'] ?? 'evolution'),
+            'last_customer_message_at' => $this->toIsoDate($row['last_customer_message_at'] ?? null),
+            'service_window_expires_at' => $this->toIsoDate($row['service_window_expires_at'] ?? null),
+            'service_window_open' => !empty($row['service_window_expires_at']) && strtotime((string) $row['service_window_expires_at']) > time(),
+            'bot_status' => (string) ($row['bot_status'] ?? 'active'),
+            'bot_paused_at' => $this->toIsoDate($row['bot_paused_at'] ?? null),
+            'bot_handoff_reason' => (string) ($row['bot_handoff_reason'] ?? ''),
             'tags' => is_array($row['_tags'] ?? null) ? $row['_tags'] : [],
             'created_at' => $this->toIsoDate($row['created_at'] ?? null),
             'updated_at' => $this->toIsoDate($row['updated_at'] ?? null),
@@ -1521,6 +1678,13 @@ class Chat_service
             'file_size' => (int) ($row['file_size'] ?? 0),
             'media_id' => isset($row['media_id']) ? (int) $row['media_id'] : null,
             'sender_user_id' => isset($row['sender_user_id']) ? (int) $row['sender_user_id'] : null,
+            'sender_jid' => (string) ($row['sender_jid'] ?? ''),
+            'sender_phone' => (string) ($row['sender_phone'] ?? ''),
+            'sender_name' => (string) ($row['sender_name'] ?? ''),
+            'sender_contact_id' => isset($row['sender_contact_id']) ? (int) $row['sender_contact_id'] : null,
+            'is_group_message' => !empty($row['is_group_message']),
+            'provider_name' => (string) ($row['provider_name'] ?? 'evolution'),
+            'provider_payload_id' => $row['provider_payload_id'] ?? null,
             'is_internal_note' => !empty($row['is_internal_note']),
             'delivery_error' => $row['delivery_error'] ?? null,
             'status' => (string) ($row['status'] ?? 'received'),
@@ -1612,7 +1776,35 @@ class Chat_service
     {
         $type = strtolower(trim($type));
 
-        return in_array($type, ['text', 'image', 'audio', 'document'], true) ? $type : 'text';
+        return in_array($type, ['text', 'image', 'audio', 'video', 'document', 'template', 'sticker', 'reaction', 'location', 'contact'], true) ? $type : 'text';
+    }
+
+    /**
+     * Text messages already have every operational field normalized into
+     * columns. Keeping the complete provider envelope for each one multiplies
+     * storage without helping rendering. Media and structured messages retain
+     * their bounded envelope because it can be required for secure retrieval.
+     *
+     * @param array<string,mixed> $raw
+     * @param array<string,mixed> $normalized
+     * @return array<string,mixed>
+     */
+    private function messageRawPayload(array $raw, string $messageType, string $providerName, array $normalized): array
+    {
+        if (in_array($messageType, ['image', 'audio', 'video', 'document', 'sticker', 'location', 'contact'], true)) {
+            $payload = $this->sanitizer->sanitize($raw);
+
+            return is_array($payload) ? $payload : [];
+        }
+
+        return [
+            'source' => 'provider_event_compact',
+            'provider' => $providerName,
+            'external_message_id' => $this->boundedText((string) ($normalized['external_message_id'] ?? ''), 191),
+            'remote_jid' => $this->boundedText((string) ($normalized['remote_jid'] ?? ''), 191),
+            'from_me' => !empty($normalized['from_me']),
+            'sender_name' => $this->boundedText((string) ($normalized['sender_name'] ?? $normalized['contact_name'] ?? ''), 191),
+        ];
     }
 
     private function safeMimeType($value): ?string

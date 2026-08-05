@@ -7,7 +7,7 @@ namespace Chatwoot_plugin\Models;
 class Chat_contacts_model extends Chat_domain_model
 {
     protected string $logicalTable = 'chat_contacts';
-    protected array $writableFields = ['instance_id', 'name', 'phone_normalized', 'email', 'company', 'city', 'source', 'notes', 'profile_picture_url', 'opt_out', 'manually_edited', 'scope_key', 'last_activity_at'];
+    protected array $writableFields = ['instance_id', 'name', 'phone_normalized', 'email', 'company', 'city', 'source', 'notes', 'profile_picture_url', 'opt_out', 'manually_edited', 'scope_key', 'last_activity_at', 'name_source', 'name_updated_at', 'last_incoming_name', 'last_incoming_name_at'];
     protected array $filterableFields = ['instance_id', 'opt_out', 'source'];
 
     public function find_by_scope(string $scopeKey): ?array

@@ -93,15 +93,68 @@ class Webhook_normalizer
             $this->path($data, ['key', 'fromMe']),
             $this->path($data, ['message', 'key', 'fromMe']),
         ]));
-        $contactName = $this->firstScalar([
+        $isGroup = $this->isGroupJid($remoteJid);
+        $explicitContactName = $this->firstScalar([
             $root['contact_name'] ?? null,
             $root['contactName'] ?? null,
-            $root['pushName'] ?? null,
             $data['contact_name'] ?? null,
             $data['contactName'] ?? null,
+        ]);
+        $pushName = $this->firstScalar([
+            $root['pushName'] ?? null,
+            $root['notifyName'] ?? null,
             $data['pushName'] ?? null,
             $data['notifyName'] ?? null,
-            $data['name'] ?? null,
+            !$isGroup ? ($data['name'] ?? null) : null,
+        ]);
+        $participantJid = $this->firstScalar([
+            $root['participant_jid'] ?? null,
+            $root['participantJid'] ?? null,
+            $root['participant'] ?? null,
+            $root['sender'] ?? null,
+            $this->path($root, ['key', 'participant']),
+            $this->path($root, ['key', 'participantAlt']),
+            $data['participant_jid'] ?? null,
+            $data['participantJid'] ?? null,
+            $data['participant'] ?? null,
+            $data['sender'] ?? null,
+            $this->path($data, ['key', 'participant']),
+            $this->path($data, ['key', 'participantAlt']),
+            $this->path($data, ['message', 'key', 'participant']),
+            $this->path($data, ['message', 'key', 'participantAlt']),
+        ]);
+        $participantAlternateJid = $this->firstScalar([
+            $root['participant_jid_alt'] ?? null,
+            $root['participantJidAlt'] ?? null,
+            $this->path($root, ['key', 'participantAlt']),
+            $data['participant_jid_alt'] ?? null,
+            $data['participantJidAlt'] ?? null,
+            $this->path($data, ['key', 'participantAlt']),
+            $this->path($data, ['message', 'key', 'participantAlt']),
+        ]);
+        $groupName = $this->firstScalar([
+            $root['group_name'] ?? null,
+            $root['groupName'] ?? null,
+            $root['subject'] ?? null,
+            $data['group_name'] ?? null,
+            $data['groupName'] ?? null,
+            $data['subject'] ?? null,
+            $this->path($data, ['chat', 'name']),
+            $this->path($data, ['chat', 'subject']),
+        ]);
+        // pushName on outgoing events normally belongs to the connected account,
+        // not to the recipient. It must never rename the customer contact.
+        $contactName = $isGroup
+            ? $groupName
+            : ($fromMe ? '' : ($explicitContactName !== '' ? $explicitContactName : $pushName));
+        $senderName = $this->firstScalar([
+            $root['sender_name'] ?? null,
+            $root['senderName'] ?? null,
+            $root['participant_name'] ?? null,
+            $data['sender_name'] ?? null,
+            $data['senderName'] ?? null,
+            $data['participant_name'] ?? null,
+            $isGroup && !$fromMe ? $pushName : null,
         ]);
         $timestamp = $this->normalizeTimestamp($this->firstValue([
             $root['timestamp'] ?? null,
@@ -136,10 +189,36 @@ class Webhook_normalizer
             'external_message_id' => $externalMessageId !== '' ? $externalMessageId : null,
             'remote_jid' => $remoteJid,
             'alternate_remote_jid' => $alternateJid,
-            'phone_number' => $this->phoneNumber($remoteJid, $alternateJid, $explicitPhone),
+            'phone_number' => $isGroup ? '' : $this->phoneNumber($remoteJid, $alternateJid, $explicitPhone),
             'from_me' => $fromMe,
             'direction' => $fromMe ? 'outgoing' : 'incoming',
             'contact_name' => $contactName,
+            'is_group' => $isGroup,
+            'conversation_type' => $isGroup ? 'group' : 'individual',
+            'group_name' => $groupName,
+            'participant_jid' => $isGroup ? $participantJid : '',
+            'participant_alternate_jid' => $isGroup ? $participantAlternateJid : '',
+            'sender_jid' => $isGroup ? $participantJid : ($fromMe ? '' : $remoteJid),
+            'sender_phone' => $isGroup
+                ? $this->phoneNumber($participantJid, $participantAlternateJid, '')
+                : ($fromMe ? '' : $this->phoneNumber($remoteJid, $alternateJid, $explicitPhone)),
+            'sender_name' => $isGroup ? $senderName : (!$fromMe ? $contactName : ''),
+            'provider_name' => $this->firstScalar([
+                $root['provider_name'] ?? null,
+                $root['provider'] ?? null,
+                $data['provider_name'] ?? null,
+                $data['provider'] ?? null,
+            ]) ?: 'evolution',
+            'provider_payload_id' => $this->firstScalar([
+                $root['provider_payload_id'] ?? null,
+                $root['providerPayloadId'] ?? null,
+                $data['provider_payload_id'] ?? null,
+                $data['providerPayloadId'] ?? null,
+            ]),
+            'delivery_error' => $this->firstScalar([
+                $root['delivery_error'] ?? null,
+                $data['delivery_error'] ?? null,
+            ]),
             'timestamp' => $timestamp,
             'text' => $text,
             'message_type' => $messageType,
@@ -345,6 +424,7 @@ class Webhook_normalizer
             'event' => (string) ($normalized['event'] ?? ''),
             'instance' => $instance,
             'remote_jid' => (string) ($normalized['remote_jid'] ?? ''),
+            'sender_jid' => (string) ($normalized['sender_jid'] ?? ''),
             'from_me' => (bool) ($normalized['from_me'] ?? false),
             'timestamp' => $normalized['timestamp'] ?? null,
             'message_type' => (string) ($normalized['message_type'] ?? ''),
@@ -422,6 +502,11 @@ class Webhook_normalizer
         }
 
         return null;
+    }
+
+    private function isGroupJid(string $remoteJid): bool
+    {
+        return str_ends_with(strtolower(trim($remoteJid)), '@g.us');
     }
 
     private function phoneFromJid(string $remoteJid): string
@@ -560,10 +645,20 @@ class Webhook_normalizer
             'external_event_id' => null,
             'external_message_id' => null,
             'remote_jid' => '',
+            'alternate_remote_jid' => '',
             'phone_number' => '',
             'from_me' => false,
             'direction' => 'incoming',
             'contact_name' => '',
+            'is_group' => false,
+            'conversation_type' => 'individual',
+            'group_name' => '',
+            'participant_jid' => '',
+            'participant_alternate_jid' => '',
+            'sender_jid' => '',
+            'sender_phone' => '',
+            'sender_name' => '',
+            'provider_name' => 'evolution',
             'timestamp' => null,
             'text' => '',
             'message_type' => 'unknown',

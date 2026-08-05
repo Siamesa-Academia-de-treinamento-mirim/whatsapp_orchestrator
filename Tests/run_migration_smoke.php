@@ -38,6 +38,8 @@ $tables = [
     'chat_settings',
     'chat_contacts',
     'chat_contact_identifiers',
+    'chat_groups',
+    'chat_group_participants',
     'chat_tags',
     'chat_contact_tags',
     'chat_conversation_tags',
@@ -47,7 +49,12 @@ $tables = [
     'chat_campaigns',
     'chat_campaign_runs',
     'chat_campaign_recipients',
+    'chat_campaign_run_recipients',
     'chat_campaign_templates',
+    'chat_bot_flows',
+    'chat_bot_flow_versions',
+    'chat_bot_sessions',
+    'chat_bot_events',
     'chat_ai_agents',
     'chat_automations',
     'chat_ai_states',
@@ -86,9 +93,16 @@ $requiredIndexes = [
     $db->prefixTable('chat_webhook_logs') => ['uq_chat_webhook_event_dedupe'],
     $db->prefixTable('chat_contacts') => ['uq_chat_contact_scope', 'idx_chat_contact_phone'],
     $db->prefixTable('chat_contact_identifiers') => ['uq_chat_contact_identifier'],
+    $db->prefixTable('chat_groups') => ['uq_chat_group_remote', 'idx_chat_group_activity'],
+    $db->prefixTable('chat_group_participants') => ['uq_chat_group_participant', 'idx_chat_group_participant_contact'],
     $db->prefixTable('chat_quick_replies') => ['uq_chat_quick_reply_shortcut'],
     $db->prefixTable('chat_campaigns') => ['uq_chat_campaign_idempotency', 'idx_chat_campaign_status'],
-    $db->prefixTable('chat_campaign_recipients') => ['uq_chat_campaign_recipient'],
+    $db->prefixTable('chat_campaign_recipients') => ['uq_chat_campaign_recipient', 'idx_chat_campaign_recipient_dispatch'],
+    $db->prefixTable('chat_campaign_runs') => ['uq_chat_campaign_occurrence', 'idx_chat_campaign_run_schedule'],
+    $db->prefixTable('chat_campaign_run_recipients') => ['uq_chat_campaign_run_recipient', 'idx_chat_campaign_run_recipient_queue'],
+    $db->prefixTable('chat_bot_flows') => ['idx_chat_bot_flow_match', 'idx_chat_bot_flow_status'],
+    $db->prefixTable('chat_bot_flow_versions') => ['uq_chat_bot_flow_version'],
+    $db->prefixTable('chat_bot_sessions') => ['uq_chat_bot_session_conversation'],
     $db->prefixTable('chat_ai_states') => ['uq_chat_ai_state_conversation'],
     $db->prefixTable('chat_notifications') => ['uq_chat_notification_dedupe'],
     $db->prefixTable('chat_integration_jobs') => ['idx_chat_job_queue'],
@@ -106,8 +120,12 @@ foreach ($requiredIndexes as $table => $expected) {
 }
 
 $requiredColumns = [
-    $db->prefixTable('chat_conversations') => ['contact_id', 'priority', 'assignee_id', 'team_id', 'resolved_at', 'resolved_by', 'ai_status', 'ai_summary', 'last_human_message_at', 'last_bot_message_at', 'first_response_at', 'first_response_seconds'],
-    $db->prefixTable('chat_messages') => ['sender_user_id', 'reply_to_external_message_id', 'caption', 'file_name', 'file_size', 'media_id', 'is_internal_note', 'delivery_error', 'failed_at'],
+    $db->prefixTable('chat_instances') => ['provider_type', 'meta_phone_number_id', 'meta_waba_id', 'meta_access_token_encrypted', 'meta_verify_token_encrypted', 'meta_app_secret_encrypted'],
+    $db->prefixTable('chat_contacts') => ['name_source', 'name_updated_at', 'last_incoming_name'],
+    $db->prefixTable('chat_conversations') => ['contact_id', 'priority', 'assignee_id', 'team_id', 'resolved_at', 'resolved_by', 'conversation_type', 'group_id', 'service_window_expires_at', 'bot_paused_at', 'bot_handoff_reason', 'last_human_message_at', 'last_bot_message_at', 'first_response_at', 'first_response_seconds'],
+    $db->prefixTable('chat_messages') => ['sender_user_id', 'sender_contact_id', 'sender_jid', 'sender_phone', 'sender_name', 'is_group_message', 'reply_to_external_message_id', 'caption', 'file_name', 'file_size', 'media_id', 'is_internal_note', 'delivery_error', 'failed_at'],
+    $db->prefixTable('chat_campaigns') => ['campaign_type', 'template_id', 'template_parameters_json', 'dispatch_mode', 'rate_limit_per_minute', 'started_at', 'finished_at'],
+    $db->prefixTable('chat_campaign_runs') => ['occurrence_key', 'scheduled_at', 'recipient_count'],
 ];
 foreach ($requiredColumns as $table => $expected) {
     $actual = array_map(static fn ($field): string => (string) $field->name, $db->getFieldData($table));
@@ -162,7 +180,7 @@ $db->table($settingsTable)->insert(['setting_key' => $sentinel, 'setting_value' 
 $runner->migrate();
 $preserved = $db->table($settingsTable)->where('setting_key', $sentinel)->where('setting_value', 'preserved')->countAllResults() === 1;
 $db->table($settingsTable)->where('setting_key', $sentinel)->delete();
-if (!$preserved || $runner->currentVersion() !== 3) {
+if (!$preserved || $runner->currentVersion() !== 9) {
     fwrite(STDERR, "Migration rerun was not idempotent or did not preserve data.\n");
     exit(1);
 }

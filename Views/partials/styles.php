@@ -1535,131 +1535,6 @@
 
     .impulso-flow-arrow svg { height: 14px; width: 14px; }
 
-    /* Reports */
-    .impulso-chart {
-        align-items: flex-end;
-        display: flex;
-        gap: 10px;
-        height: 210px;
-        padding: 18px 5px 0;
-    }
-
-    .impulso-chart-column {
-        align-items: center;
-        display: flex;
-        flex: 1;
-        flex-direction: column;
-        gap: 7px;
-        height: 100%;
-        justify-content: flex-end;
-    }
-
-    .impulso-chart-bar {
-        background: linear-gradient(180deg, var(--ih-primary), rgba(109,93,252,.4));
-        border-radius: 7px 7px 2px 2px;
-        min-height: 10px;
-        position: relative;
-        transition: transform .15s ease;
-        width: min(34px, 70%);
-    }
-
-    .impulso-chart-bar:hover {
-        transform: translateY(-3px);
-    }
-
-    .impulso-chart-bar::before {
-        background: #1f2937;
-        border-radius: 5px;
-        color: #fff;
-        content: attr(data-value);
-        font-size: 8px;
-        left: 50%;
-        opacity: 0;
-        padding: 3px 5px;
-        pointer-events: none;
-        position: absolute;
-        top: -24px;
-        transform: translateX(-50%);
-        transition: opacity .15s ease;
-    }
-
-    .impulso-chart-bar:hover::before { opacity: 1; }
-
-    .impulso-chart-label {
-        color: inherit;
-        font-size: 9px;
-    }
-
-    .impulso-donut-wrap {
-        align-items: center;
-        display: flex;
-        gap: 24px;
-        justify-content: center;
-        min-height: 240px;
-    }
-
-    .impulso-donut {
-        align-items: center;
-        background: conic-gradient(var(--ih-primary) 0 36%, var(--ih-success) 36% 64%, var(--ih-warning) 64% 86%, var(--ih-info) 86% 100%);
-        border-radius: 50%;
-        display: flex;
-        height: 145px;
-        justify-content: center;
-        position: relative;
-        width: 145px;
-    }
-
-    .impulso-donut::after {
-        background: inherit;
-        border-radius: 50%;
-        content: '';
-        height: 88px;
-        position: absolute;
-        width: 88px;
-    }
-
-    .impulso-donut-center {
-        position: relative;
-        text-align: center;
-        z-index: 1;
-    }
-
-    .impulso-donut-center strong {
-        display: block;
-        font-size: 20px;
-    }
-
-    .impulso-donut-center span {
-        color: inherit;
-        font-size: 8px;
-        text-transform: uppercase;
-    }
-
-    .impulso-legend {
-        min-width: 150px;
-    }
-
-    .impulso-legend-item {
-        align-items: center;
-        display: flex;
-        font-size: 10px;
-        gap: 8px;
-        justify-content: space-between;
-        margin-bottom: 9px;
-    }
-
-    .impulso-legend-label {
-        align-items: center;
-        display: flex;
-        gap: 6px;
-    }
-
-    .impulso-legend-color {
-        border-radius: 3px;
-        height: 9px;
-        width: 9px;
-    }
-
     /* Settings */
     .impulso-settings-layout {
         display: grid;
@@ -2633,6 +2508,16 @@
     .impulso-hub .impulso-funnel-step strong { display: block; }
     .impulso-hub .impulso-funnel-step strong { font-size: 22px; margin: 4px 0 12px; }
 
+    .impulso-hub .impulso-message-author { color: var(--ih-primary); display: block; font-size: 10px; font-weight: 800; margin-bottom: 4px; }
+    .impulso-hub .impulso-run-item { align-items: center; background: transparent; border: 1px solid transparent; border-radius: 9px; color: inherit; display: flex; gap: 8px; justify-content: space-between; margin-bottom: 5px; padding: 10px; text-align: left; width: 100%; }
+    .impulso-hub .impulso-run-item:hover { background: var(--ih-surface-soft); }
+    .impulso-hub .impulso-run-item.active { background: var(--ih-primary-soft); border-color: var(--ih-primary); }
+    .impulso-hub .impulso-run-item strong,
+    .impulso-hub .impulso-run-item small { display: block; }
+    .impulso-hub .impulso-run-item small { margin-top: 3px; opacity: .68; }
+    .impulso-hub .impulso-stat-card.compact { min-height: 88px; padding: 14px; }
+    .impulso-hub .impulso-stat-card.compact .impulso-stat-value { font-size: 24px; }
+
     .impulso-hub .impulso-media-modal-content { overflow: hidden; }
     .impulso-hub #impulso-media-stage { align-items: center; background: rgba(0,0,0,.86); display: flex; justify-content: center; min-height: 55vh; padding: 20px; }
     .impulso-hub #impulso-media-stage img,
@@ -2702,5 +2587,43 @@
         .impulso-hub .impulso-composer-popover { left: 8px; max-width: calc(100vw - 32px); width: 310px; }
         .impulso-hub .impulso-bulk-bar { align-items: stretch; flex-direction: column; }
         .impulso-hub .impulso-bulk-bar strong { margin: 0; }
+    }
+
+    /* Conversations fit the Rise viewport; scrolling remains inside each column. */
+    #page-content.impulso-page-content--conversations {
+        --impulso-viewport-offset: 115px;
+        box-sizing: border-box;
+        height: calc(100vh - var(--impulso-viewport-offset));
+        height: calc(100dvh - var(--impulso-viewport-offset));
+        min-height: 0 !important;
+        overflow: hidden;
+    }
+
+    #page-content.impulso-page-content--conversations > .impulso-hub,
+    #page-content.impulso-page-content--conversations .impulso-shell-card {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        min-height: 0;
+        min-width: 0;
+    }
+
+    #page-content.impulso-page-content--conversations .impulso-topbar,
+    #page-content.impulso-page-content--conversations .impulso-section-nav,
+    #page-content.impulso-page-content--conversations .impulso-mobile-nav {
+        flex: 0 0 auto;
+    }
+
+    #page-content.impulso-page-content--conversations .impulso-workspace {
+        flex: 1 1 auto;
+        min-height: 0;
+        min-width: 0;
+        overflow: hidden;
+    }
+
+    #page-content.impulso-page-content--conversations .impulso-conversations-page,
+    #page-content.impulso-page-content--conversations .impulso-chat-layout {
+        height: 100%;
+        min-height: 0;
     }
 </style>

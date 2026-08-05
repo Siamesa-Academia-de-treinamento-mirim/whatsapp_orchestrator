@@ -135,7 +135,7 @@ class V003_Backfill_conversation_contacts extends Migration
     private function seedSetting(string $key, string $value): void
     {
         $table = $this->db->prefixTable('chat_settings');
-        if ($this->db->table($table)->where('setting_key', $key)->where('deleted', 0)->countAllResults() > 0) return;
+        if ($this->db->table($table)->where('setting_key', $key)->countAllResults() > 0) return;
         $now = gmdate('Y-m-d H:i:s');
         $this->db->table($table)->insert(['setting_key' => $key, 'setting_value' => $value, 'is_encrypted' => 0, 'created_at' => $now, 'updated_at' => $now, 'deleted' => 0]);
     }

@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Chatwoot_plugin\Services;
 
-use Chatwoot_plugin\Libraries\N8n_client;
 use Chatwoot_plugin\Models\Chat_integration_jobs_model;
 use Chatwoot_plugin\Models\Chat_settings_model;
 use CodeIgniter\Database\BaseConnection;
@@ -124,9 +123,8 @@ class Integration_job_service
             $this->enqueue('instance_status', [], 3, 'instance-status-periodic');
             $scheduled++;
         }
-        $n8n = new N8n_client($this->settings);
-        if ($n8n->configured() && $this->due('campaign-reconcile-periodic', 300)) {
-            $this->enqueue('campaign_reconcile', [], 3, 'campaign-reconcile-periodic');
+        if ($this->due('campaign-internal-schedule-periodic', 60)) {
+            $this->enqueue('campaign_schedule', [], 3, 'campaign-internal-schedule-periodic');
             $scheduled++;
         }
         return $scheduled;
@@ -148,45 +146,26 @@ class Integration_job_service
             }
             return;
         }
-        if ($type === 'campaign_reconcile') {
-            $this->reconcileCampaigns();
+        if ($type === 'bot_process') {
+            $messageId = (int) ($payload['message_id'] ?? 0);
+            if ($messageId < 1) throw new RuntimeException('Job do bot sem mensagem valida.');
+            (new Bot_service())->process_message($messageId);
+            return;
+        }
+        if ($type === 'campaign_schedule') {
+            (new Campaign_dispatch_service())->scheduleDue();
+            return;
+        }
+        if ($type === 'campaign_recipient') {
+            $campaignId = (int) ($payload['campaign_id'] ?? 0);
+            $runId = (int) ($payload['run_id'] ?? 0);
+            $recipientId = (int) ($payload['recipient_id'] ?? 0);
+            if ($campaignId < 1 || $runId < 1 || $recipientId < 1) throw new RuntimeException('Job de campanha sem execucao ou destinatario valido.');
+            (new Campaign_dispatch_service())->dispatchRecipient($campaignId, $recipientId, $runId);
             return;
         }
         if ($type !== 'maintenance') {
             throw new RuntimeException('Tipo de job desconhecido: ' . $type . '.');
-        }
-    }
-
-    private function reconcileCampaigns(): void
-    {
-        $path = '/' . ltrim((string) $this->settings->get_value('n8n_campaigns_path', '/webhook/campanha'), '/');
-        $response = (new N8n_client($this->settings))->request('GET', $path, null, ['idempotent' => true]);
-        if (!$response['success']) {
-            throw new RuntimeException((string) $response['error']);
-        }
-        $rows = is_array($response['data']) ? ($response['data']['data'] ?? $response['data']) : [];
-        if (!is_array($rows)) {
-            throw new RuntimeException('Resposta de reconciliacao de campanhas invalida.');
-        }
-        foreach ($rows as $row) {
-            if (!is_array($row)) continue;
-            $external = trim((string) ($row['id'] ?? $row['campaign_id'] ?? ''));
-            if ($external === '') continue;
-            $local = $this->db->table('chat_campaigns')->select('id,name,status')->where('external_id', $external)->where('deleted', 0)->get(1)->getRowArray();
-            if (!$local) continue;
-            $status = $this->campaignStatus((string) ($row['status'] ?? ''));
-            $this->db->table('chat_campaigns')->where('id', (int) $local['id'])->update([
-                'status' => $status,
-                'metrics_json' => json_encode($row['metrics'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                'last_sync_at' => gmdate('Y-m-d H:i:s'),
-                'last_error' => $status === 'failed' ? mb_substr((string) ($row['error'] ?? 'Falha informada pelo n8n.'), 0, 1000) : null,
-                'updated_at' => gmdate('Y-m-d H:i:s'),
-            ]);
-            if ($status !== (string) $local['status'] && in_array($status, ['completed', 'failed', 'paused'], true)) {
-                $titles = ['completed' => 'Campanha concluida', 'failed' => 'Campanha com falha', 'paused' => 'Campanha pausada'];
-                $levels = ['completed' => 'success', 'failed' => 'danger', 'paused' => 'warning'];
-                (new Notification_service())->create('campaign', $titles[$status], (string) $local['name'], 'campaign', (int) $local['id'], null, $levels[$status], 'campaign-state|' . $local['id'] . '|' . $status);
-            }
         }
     }
 
@@ -266,10 +245,4 @@ class Integration_job_service
         return is_array($decoded) ? $decoded : [];
     }
 
-    private function campaignStatus(string $status): string
-    {
-        $status = strtolower(trim($status));
-        $status = ['active' => 'running', 'started' => 'running', 'stopped' => 'paused', 'done' => 'completed', 'error' => 'failed'][$status] ?? $status;
-        return in_array($status, ['draft', 'scheduled', 'running', 'paused', 'completed', 'failed', 'cancelled'], true) ? $status : 'draft';
-    }
 }
