@@ -20,12 +20,15 @@ class Chat_settings_model extends Crud_model
     public const ENDPOINT_FIND_MESSAGES = 'evolution_endpoint_find_messages';
     public const ENDPOINT_SEND_TEXT = 'evolution_endpoint_send_text';
     public const ENDPOINT_SEND_MEDIA = 'evolution_endpoint_send_media';
+    public const ENDPOINT_SEND_REACTION = 'evolution_endpoint_send_reaction';
     public const ENDPOINT_SEND_AUDIO = 'evolution_endpoint_send_audio';
     public const ENDPOINT_MEDIA_BASE64 = 'evolution_endpoint_media_base64';
 
     protected $table = null;
 
     private Credential_cipher $credentialCipher;
+    /** @var array<string,mixed>|null Values loaded during this request. */
+    private ?array $requestCache = null;
 
     public function __construct(?Credential_cipher $credentialCipher = null)
     {
@@ -42,27 +45,52 @@ class Chat_settings_model extends Crud_model
      */
     public function get_value(string $key, $default = null)
     {
-        $key = trim($key);
-        if ($key === '') {
-            throw new InvalidArgumentException('Setting key cannot be empty.');
+        return $this->get_values([$key], [$key => $default])[$key];
+    }
+
+    /**
+     * Read several settings with one query. Decryption remains server-side and
+     * the cache belongs only to this model/request instance.
+     *
+     * @param array<int,string> $keys
+     * @param array<string,mixed> $defaults
+     * @return array<string,mixed>
+     */
+    public function get_values(array $keys, array $defaults = []): array
+    {
+        $normalized = [];
+        foreach ($keys as $key) {
+            $key = trim((string) $key);
+            if ($key === '') throw new InvalidArgumentException('Setting key cannot be empty.');
+            $normalized[$key] = true;
+        }
+        $keys = array_keys($normalized);
+        if ($this->requestCache === null) $this->requestCache = [];
+
+        $missing = array_values(array_filter($keys, fn (string $key): bool => !array_key_exists($key, $this->requestCache)));
+        if ($missing !== []) {
+            $rows = $this->db->table($this->table)
+                ->whereIn('setting_key', $missing)
+                ->where('deleted', 0)
+                ->get()
+                ->getResultArray();
+            foreach ($rows as $row) {
+                $key = (string) ($row['setting_key'] ?? '');
+                if ($key === '') continue;
+                $value = $row['setting_value'] ?? null;
+                if ((int) ($row['is_encrypted'] ?? 0) === 1 && is_string($value) && $value !== '') {
+                    $value = $this->credentialCipher->decrypt($value);
+                }
+                $this->requestCache[$key] = $value;
+            }
+            foreach ($missing as $key) {
+                if (!array_key_exists($key, $this->requestCache)) $this->requestCache[$key] = null;
+            }
         }
 
-        $row = $this->db->table($this->table)
-            ->where('setting_key', $key)
-            ->where('deleted', 0)
-            ->get(1)
-            ->getRowArray();
-
-        if (!$row) {
-            return $default;
-        }
-
-        $value = $row['setting_value'];
-        if ((int) $row['is_encrypted'] === 1 && is_string($value) && $value !== '') {
-            return $this->credentialCipher->decrypt($value);
-        }
-
-        return $value;
+        $result = [];
+        foreach ($keys as $key) $result[$key] = $this->requestCache[$key] ?? ($defaults[$key] ?? null);
+        return $result;
     }
 
     public function upsert_setting(string $key, ?string $value, bool $encrypted = false): bool
@@ -88,6 +116,8 @@ class Chat_settings_model extends Crud_model
             'deleted' => 0,
         ]);
 
+        if ($success !== false) $this->requestCache = null;
+
         return $success !== false;
     }
 
@@ -98,7 +128,7 @@ class Chat_settings_model extends Crud_model
             throw new InvalidArgumentException('Setting key cannot be empty.');
         }
 
-        return $this->db->table($this->table)
+        $success = $this->db->table($this->table)
             ->where('setting_key', $key)
             ->update([
                 'setting_value' => null,
@@ -106,6 +136,8 @@ class Chat_settings_model extends Crud_model
                 'updated_at' => gmdate('Y-m-d H:i:s'),
                 'deleted' => 1,
             ]);
+        if ($success !== false) $this->requestCache = null;
+        return $success;
     }
 
     /**

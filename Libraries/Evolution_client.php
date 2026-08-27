@@ -23,6 +23,7 @@ class Evolution_client
         'messages' => '/chat/findMessages/{instance}',
         'send_text' => '/message/sendText/{instance}',
         'send_media' => '/message/sendMedia/{instance}',
+        'send_reaction' => '/message/sendReaction/{instance}',
         'send_audio' => '/message/sendWhatsAppAudio/{instance}',
         'media_base64' => '/chat/getBase64FromMediaMessage/{instance}',
     ];
@@ -33,6 +34,7 @@ class Evolution_client
         'messages' => 'evolution_endpoint_find_messages',
         'send_text' => 'evolution_endpoint_send_text',
         'send_media' => 'evolution_endpoint_send_media',
+        'send_reaction' => 'evolution_endpoint_send_reaction',
         'send_audio' => 'evolution_endpoint_send_audio',
         'media_base64' => 'evolution_endpoint_media_base64',
     ];
@@ -215,6 +217,12 @@ class Evolution_client
      */
     public function send_text(string $number, string $text, $instance = null): array
     {
+        return $this->send_text_with_context($number, $text, $instance, []);
+    }
+
+    /** @return array<string, mixed> */
+    public function send_text_with_context(string $number, string $text, $instance = null, array $options = []): array
+    {
         $number = $this->normalizeNumber($number);
         if ($number === '') {
             return $this->failure('validation_error', 'Numero de destino invalido.');
@@ -224,10 +232,13 @@ class Evolution_client
             return $this->failure('validation_error', 'A mensagem nao pode estar vazia.');
         }
 
+        $payload = ['number' => $number, 'text' => $text];
+        $quoted = $this->quotedPayload($options);
+        if ($quoted !== null) $payload['quoted'] = $quoted;
         $response = $this->requestEndpoint(
             'POST',
             'send_text',
-            ['number' => $number, 'text' => $text],
+            $payload,
             $instance
         );
         $response['message_id'] = $response['success']
@@ -244,7 +255,7 @@ class Evolution_client
     }
 
     /** @return array<string,mixed> */
-    public function send_media(string $number, string $media, string $mimeType, string $mediaType, string $fileName = '', string $caption = '', $instance = null): array
+    public function send_media(string $number, string $media, string $mimeType, string $mediaType, string $fileName = '', string $caption = '', $instance = null, array $options = []): array
     {
         $number = $this->normalizeNumber($number);
         if ($number === '' || trim($media) === '') {
@@ -260,15 +271,65 @@ class Evolution_client
         if ($fileName !== '') {
             $payload['fileName'] = $fileName;
         }
-        $response = $this->requestEndpoint('POST', $mediaType === 'audio' ? 'send_audio' : 'send_media', $mediaType === 'audio' ? ['number' => $number, 'audio' => $media, 'encoding' => true] : $payload, $instance);
+        $isVoiceNote = $mediaType === 'audio' && !empty($options['voice_note']);
+        $quoted = $this->quotedPayload($options);
+        if ($quoted !== null) {
+            if ($isVoiceNote) $voicePayload = ['number' => $number, 'audio' => $media, 'encoding' => true, 'ptt' => true, 'quoted' => $quoted];
+            else $payload['quoted'] = $quoted;
+        }
+        $response = $this->requestEndpoint('POST', $isVoiceNote ? 'send_audio' : 'send_media', $isVoiceNote ? ($voicePayload ?? ['number' => $number, 'audio' => $media, 'encoding' => true, 'ptt' => true]) : $payload, $instance);
         $response['message_id'] = $response['success'] ? $this->extract_message_id($response['data']) : null;
         return $response;
     }
 
     /** @return array<string,mixed> */
-    public function sendMedia(string $number, string $media, string $mimeType, string $mediaType, string $fileName = '', string $caption = '', $instance = null): array
+    public function sendMedia(string $number, string $media, string $mimeType, string $mediaType, string $fileName = '', string $caption = '', $instance = null, array $options = []): array
     {
-        return $this->send_media($number, $media, $mimeType, $mediaType, $fileName, $caption, $instance);
+        return $this->send_media($number, $media, $mimeType, $mediaType, $fileName, $caption, $instance, $options);
+    }
+
+    /** @return array<string,mixed> */
+    public function send_reaction(string $number, string $messageId, string $emoji, $instance = null, array $options = []): array
+    {
+        $number = $this->normalizeNumber($number);
+        $messageId = trim($messageId);
+        if ($number === '' || $messageId === '') return $this->failure('validation_error', 'Numero e mensagem alvo sao obrigatorios.');
+        $remoteJid = trim((string) ($options['remote_jid'] ?? '')) ?: $number . '@s.whatsapp.net';
+        $payload = [
+            'reactionKey' => [
+                'remoteJid' => $remoteJid,
+                'fromMe' => !empty($options['from_me']),
+                'id' => $messageId,
+            ],
+            'reactionMessage' => mb_substr($emoji, 0, 16),
+        ];
+        $participant = trim((string) ($options['participant'] ?? ''));
+        if ($participant !== '' && str_ends_with(strtolower($remoteJid), '@g.us')) {
+            $payload['reactionKey']['participant'] = $participant;
+        }
+        $response = $this->requestEndpoint('POST', 'send_reaction', $payload, $instance);
+        $response['message_id'] = $response['success'] ? $this->extract_message_id($response['data']) : null;
+        return $response;
+    }
+
+    /** @return array<string,mixed> */
+    public function sendReaction(string $number, string $messageId, string $emoji, $instance = null, array $options = []): array
+    {
+        return $this->send_reaction($number, $messageId, $emoji, $instance, $options);
+    }
+
+    /** @param array<string,mixed> $options @return array<string,mixed>|null */
+    private function quotedPayload(array $options): ?array
+    {
+        $id = trim((string) ($options['reply_to_external_message_id'] ?? ''));
+        if ($id === '') return null;
+        return [
+            'key' => [
+                'remoteJid' => trim((string) ($options['reply_to_remote_jid'] ?? '')),
+                'fromMe' => !empty($options['reply_to_from_me']),
+                'id' => $id,
+            ],
+        ];
     }
 
     /**
@@ -748,6 +809,7 @@ class Evolution_client
             'evolution_endpoint_find_chats',
             'evolution_endpoint_find_messages',
             'evolution_endpoint_send_text',
+            'evolution_endpoint_send_reaction',
         ];
         foreach ($keys as $key) {
             foreach (['get_value', 'getValue', 'get_setting', 'getSetting'] as $method) {

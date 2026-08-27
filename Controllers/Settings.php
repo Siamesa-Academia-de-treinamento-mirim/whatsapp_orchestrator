@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Chatwoot_plugin\Controllers;
 
 use Chatwoot_plugin\Services\Chat_service;
+use Chatwoot_plugin\Services\Conversation_workflow_service;
 use CodeIgniter\HTTP\ResponseInterface;
 use InvalidArgumentException;
 use Throwable;
@@ -105,8 +106,12 @@ class Settings extends Api_controller
 
         $defaultStatus = strtolower(trim((string) ($input['default_status'] ?? 'open')));
         if (!in_array($defaultStatus, ['open', 'pending'], true)) $errors['default_status'] = 'Status inicial invalido.';
-        $defaultPriority = strtolower(trim((string) ($input['default_priority'] ?? 'normal')));
-        if (!in_array($defaultPriority, ['low', 'normal', 'high', 'urgent'], true)) $errors['default_priority'] = 'Prioridade inicial invalida.';
+        try {
+            $defaultPriority = Conversation_workflow_service::validatePriority($input['default_priority'] ?? 'medium');
+        } catch (Throwable $exception) {
+            $defaultPriority = 'medium';
+            $errors['default_priority'] = 'Prioridade inicial invalida.';
+        }
 
         $campaignStart = trim((string) ($input['campaign_window_start'] ?? '08:00'));
         $campaignEnd = trim((string) ($input['campaign_window_end'] ?? '20:00'));

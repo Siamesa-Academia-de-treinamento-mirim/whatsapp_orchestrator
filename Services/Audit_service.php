@@ -81,4 +81,168 @@ class Audit_service
         }, $result['data']);
         return $result;
     }
+
+    /** @return array{data:array<int,array<string,mixed>>,meta:array<string,mixed>} */
+    public function conversationActivity(int $conversationId, int $page = 1, int $limit = 30): array
+    {
+        $result = $this->list([
+            'resource_type' => 'conversation',
+            'resource_id' => (string) $conversationId,
+        ], $page, min(100, max(1, $limit)));
+        $allowed = [
+            'conversation.opened' => 'Conversa aberta',
+            'conversation.pending' => 'Conversa pendente',
+            'conversation.resolved' => 'Conversa resolvida',
+            'conversation.snoozed' => 'Conversa adiada',
+            'conversation.read' => 'Conversa marcada como lida',
+            'conversation.unread' => 'Conversa marcada como nao lida',
+            'conversation.assigned' => 'Responsavel atualizado',
+            'conversation.team_assigned' => 'Equipe atualizada',
+            'conversation.priority_changed' => 'Prioridade atualizada',
+            'conversation.tags_changed' => 'Etiquetas atualizadas',
+            'conversation.bot_paused' => 'Bot pausado',
+            'conversation.bot_resumed' => 'Bot retomado',
+            'bot.conversation_paused' => 'Bot pausado',
+            'bot.conversation_resumed' => 'Bot retomado',
+        ];
+        $actorIds = [];
+        $assigneeIds = [];
+        $teamIds = [];
+        foreach ($result['data'] as $row) {
+            $actorId = (int) ($row['actor_user_id'] ?? 0);
+            if ($actorId > 0) $actorIds[$actorId] = true;
+            foreach (['before', 'after'] as $side) {
+                $details = is_array($row[$side] ?? null) ? $row[$side] : [];
+                $assigneeId = (int) ($details['assignee_id'] ?? 0);
+                $teamId = (int) ($details['team_id'] ?? 0);
+                if ($assigneeId > 0) $assigneeIds[$assigneeId] = true;
+                if ($teamId > 0) $teamIds[$teamId] = true;
+            }
+        }
+        $db = db_connect('default');
+        $actors = $this->resolveStaffNames($db, array_keys($actorIds));
+        $assignees = $this->resolveStaffNames($db, array_keys($assigneeIds), true);
+        $teams = $this->resolveTeamNames($db, array_keys($teamIds));
+        $projected = [];
+        foreach ($result['data'] as $row) {
+            $action = (string) ($row['action'] ?? '');
+            $before = is_array($row['before'] ?? null) ? $row['before'] : [];
+            $after = is_array($row['after'] ?? null) ? $row['after'] : [];
+            $details = $this->projectActivityDetails($before, $after, $assignees, $teams);
+            $actorId = !empty($row['actor_user_id']) ? (int) $row['actor_user_id'] : null;
+            $actor = $actorId ? ($actors[$actorId] ?? 'Usuario indisponivel') : 'Sistema';
+            $projected[] = [
+                'id' => (int) ($row['id'] ?? 0),
+                'action' => $action,
+                'label' => $allowed[$action] ?? 'Atualizacao da conversa',
+                'actor_id' => $actorId,
+                'actor' => $actor,
+                'text' => $this->activityText($action, $actor, $before, $after, $details),
+                'details' => $details,
+                'created_at' => $row['created_at'] ?? null,
+            ];
+        }
+        $result['data'] = $projected;
+        return $result;
+    }
+
+    private function resolveStaffNames($db, array $ids, bool $includeInactive = false): array
+    {
+        $ids = array_values(array_filter(array_map('intval', $ids), static fn (int $id): bool => $id > 0));
+        if (!$ids) return [];
+        $rows = $db->table('users')->select('id,first_name,last_name,status,deleted')->whereIn('id', $ids)->get()->getResultArray();
+        $names = [];
+        foreach ($rows as $row) {
+            $name = trim((string) $row['first_name'] . ' ' . (string) $row['last_name']);
+            if ($includeInactive && ((int) ($row['deleted'] ?? 0) === 1 || (string) ($row['status'] ?? '') !== 'active')) $name .= ' (inativo)';
+            $names[(int) $row['id']] = $name !== '' ? $name : 'Atendente #' . (int) $row['id'];
+        }
+        foreach ($ids as $id) {
+            if (!isset($names[$id])) $names[$id] = 'Atendente #' . $id;
+        }
+        return $names;
+    }
+
+    private function resolveTeamNames($db, array $ids): array
+    {
+        $ids = array_values(array_filter(array_map('intval', $ids), static fn (int $id): bool => $id > 0));
+        if (!$ids) return [];
+        $names = [];
+        try {
+            $rows = $db->table('team')->select('id,title,deleted')->whereIn('id', $ids)->get()->getResultArray();
+            foreach ($rows as $row) {
+                $name = (string) ($row['title'] ?? '');
+                if ((int) ($row['deleted'] ?? 0) === 1) $name .= ' (inativa)';
+                $names[(int) $row['id']] = $name !== '' ? $name : 'Equipe #' . (int) $row['id'];
+            }
+        } catch (Throwable $exception) {
+            // Team is optional in older host installations.
+        }
+        foreach ($ids as $id) {
+            if (!isset($names[$id])) $names[$id] = 'Equipe #' . $id;
+        }
+        return $names;
+    }
+
+    private function projectActivityDetails(array $before, array $after, array $assignees, array $teams): array
+    {
+        $details = [];
+        foreach (['status', 'priority', 'snoozed_until', 'tags'] as $key) {
+            if (array_key_exists($key, $after)) $details[$key] = is_scalar($after[$key]) || $after[$key] === null ? $after[$key] : (array) $after[$key];
+        }
+        foreach (['assignee_id', 'team_id'] as $key) {
+            if (!array_key_exists($key, $after)) continue;
+            $id = (int) ($after[$key] ?? 0);
+            $details[$key] = $id > 0 ? $id : null;
+            if ($key === 'assignee_id') $details['assignee'] = $id > 0 ? ['id' => $id, 'name' => $assignees[$id] ?? 'Atendente #' . $id] : null;
+            if ($key === 'team_id') $details['team'] = $id > 0 ? ['id' => $id, 'name' => $teams[$id] ?? 'Equipe #' . $id] : null;
+        }
+        return $details;
+    }
+
+    private function activityText(string $action, string $actor, array $before, array $after, array $details): string
+    {
+        $priorityLabels = ['none' => 'Sem prioridade', 'low' => 'Baixa', 'medium' => 'Media', 'normal' => 'Media', 'high' => 'Alta', 'urgent' => 'Urgente'];
+        $prefix = $actor === 'Sistema' ? 'Sistema' : $actor;
+        if ($action === 'conversation.assigned') return $prefix . ' atribuiu a conversa a ' . (string) ($details['assignee']['name'] ?? 'Sem agente');
+        if ($action === 'conversation.team_assigned') return $prefix . ' alterou a equipe para ' . (string) ($details['team']['name'] ?? 'Sem equipe');
+        if ($action === 'conversation.priority_changed') {
+            return $prefix . ' alterou a prioridade de ' . ($priorityLabels[strtolower((string) ($before['priority'] ?? 'none'))] ?? 'Sem prioridade') . ' para ' . ($priorityLabels[strtolower((string) ($after['priority'] ?? 'none'))] ?? 'Sem prioridade');
+        }
+        if ($action === 'conversation.snoozed') return 'Conversa adiada ate ' . $this->formatActivityDate((string) ($after['snoozed_until'] ?? ''));
+        if ($action === 'conversation.pending') return $prefix . ' marcou a conversa como pendente';
+        if ($action === 'conversation.resolved') return $prefix . ' resolveu a conversa';
+        if ($action === 'conversation.opened') return $prefix . ' abriu a conversa';
+        if ($action === 'conversation.read') return $prefix . ' marcou a conversa como lida';
+        if ($action === 'conversation.unread') return $prefix . ' marcou a conversa como nao lida';
+        if ($action === 'conversation.tags_changed') {
+            $tags = is_array($after['tags'] ?? null) ? $after['tags'] : [];
+            $labels = [];
+            foreach (array_slice($tags, 0, 5) as $tag) {
+                if (is_scalar($tag)) {
+                    $label = trim((string) $tag);
+                    if ($label !== '') $labels[] = mb_substr($label, 0, 80);
+                } elseif (is_array($tag) && isset($tag['name']) && is_scalar($tag['name'])) {
+                    $label = trim((string) $tag['name']);
+                    if ($label !== '') $labels[] = mb_substr($label, 0, 80);
+                }
+            }
+            $suffix = count($tags) > count($labels) ? ' (+' . (count($tags) - count($labels)) . ')' : '';
+            return $prefix . ' atualizou as etiquetas para ' . ($labels ? implode(', ', $labels) : 'nenhuma') . $suffix;
+        }
+        if (in_array($action, ['conversation.bot_paused', 'bot.conversation_paused'], true)) return $prefix . ' pausou o bot para atendimento humano';
+        if (in_array($action, ['conversation.bot_resumed', 'bot.conversation_resumed'], true)) return $prefix . ' retomou o bot';
+        return 'Atualizacao da conversa';
+    }
+
+    private function formatActivityDate(string $value): string
+    {
+        if ($value === '') return 'data futura';
+        try {
+            $timezone = new \DateTimeZone((string) $this->settings->get_value('timezone', 'UTC'));
+            return (new \DateTimeImmutable($value, new \DateTimeZone('UTC')))->setTimezone($timezone)->format('d/m/Y H:i');
+        } catch (Throwable $exception) {
+            return 'data futura';
+        }
+    }
 }

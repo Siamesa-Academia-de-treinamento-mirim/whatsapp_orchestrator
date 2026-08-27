@@ -90,7 +90,7 @@ $test('conversas ocupam o viewport sem criar rolagem externa', static function (
     $index = $read('Views/index.php');
     $styles = $read('Views/partials/styles.php');
     $assert(str_contains($index, 'impulso-page-content--conversations'), 'O container de conversas nao recebeu o escopo responsivo.');
-    foreach (['#page-content.impulso-page-content--conversations', '100dvh', 'min-height: 0 !important', 'overflow: hidden'] as $needle) {
+    foreach (['#page-content.impulso-page-content--conversations', '--impulso-available-height', 'min-height: 0 !important', 'overflow: hidden'] as $needle) {
         $assert(str_contains($styles, $needle), 'Regra responsiva ausente: ' . $needle);
     }
 });
@@ -111,7 +111,7 @@ $test('caixa de entrada usa leitura local imediata e sincronizacao remota limita
 
 $test('provedores implementam o mesmo contrato', static function () use ($read, $assert): void {
     $contract = $read('Contracts/WhatsAppProviderInterface.php');
-    foreach (['sendText', 'sendMedia', 'sendTemplate', 'normalizeWebhook', 'getCapabilities', 'testConnection'] as $method) {
+    foreach (['sendText', 'sendMedia', 'sendTemplate', 'sendReaction', 'normalizeWebhook', 'getCapabilities', 'testConnection'] as $method) {
         $assert(str_contains($contract, 'function ' . $method . '('), 'Método ausente no contrato: ' . $method);
     }
     foreach (['Providers/Evolution_provider.php', 'Providers/Meta_cloud_provider.php'] as $provider) {
@@ -120,13 +120,22 @@ $test('provedores implementam o mesmo contrato', static function () use ($read, 
     }
 });
 
-$test('migrações críticas estão registradas até a versão 9', static function () use ($read, $assert): void {
+$test('migrações críticas estão registradas até a versão 15', static function () use ($read, $assert): void {
     $runner = $read('Libraries/Migration_runner.php');
-    foreach (range(4, 9) as $version) {
-        $assert(str_contains($runner, 'V00' . $version . '_'), 'Migração V00' . $version . ' não registrada.');
+    foreach (range(4, 13) as $version) {
+        $prefix = $version < 10 ? 'V00' : 'V0';
+        $assert(str_contains($runner, $prefix . $version . '_'), 'Migração V' . str_pad((string) $version, 3, '0', STR_PAD_LEFT) . ' não registrada.');
     }
     $assert(str_contains($runner, 'V008_Migrate_legacy_campaign_dispatch::VERSION'), 'Migração de campanhas legadas não registrada.');
     $assert(str_contains($runner, 'V009_Retire_legacy_ai_reports_and_n8n::VERSION'), 'Migração de retirada dos módulos legados não registrada.');
+    $assert(str_contains($runner, 'V010_Add_message_delivery_timestamps::VERSION'), 'Migração de timestamps de entrega/leitura não registrada.');
+    $assert(str_contains($runner, 'V011_Create_chat_message_reactions::VERSION'), 'Migration V011 de reacoes de mensagens nao registrada.');
+    $assert(str_contains($runner, 'V012_Create_chat_message_reaction_attempts::VERSION'), 'Migration V012 de tentativas de reacoes nao registrada.');
+    $assert(str_contains($runner, 'V013_Harden_chat_message_reactions::VERSION'), 'Migration V013 de hardening de reacoes nao registrada.');
+    $migration = $read('Database/Migrations/V014_Add_conversation_workflow_snooze.php');
+    $assert(str_contains($runner, 'V014_Add_conversation_workflow_snooze::VERSION') && str_contains($migration, 'snoozed_until') && str_contains($migration, 'idx_chat_conversation_snooze'), 'Migration V014 de snooze nao registrada corretamente.');
+    $phase7 = $read('Database/Migrations/V015_Collaboration_productivity.php');
+    $assert(str_contains($runner, 'V015_Collaboration_productivity::VERSION') && str_contains($phase7, 'chat_internal_note_mentions') && str_contains($phase7, 'chat_saved_views') && str_contains($phase7, 'chat_conversation_presence'), 'Migration V015 de collaboration nao registrada corretamente.');
     $legacy = $read('Database/Migrations/V008_Migrate_legacy_campaign_dispatch.php');
     $errorPosition = strpos($legacy, 'SET `last_error`');
     $statusPosition = strpos($legacy, '`status` = CASE');
@@ -196,6 +205,37 @@ $test('resposta humana pausa o bot somente após envio bem-sucedido', static fun
     $providerPos = strpos($media, 'sendMedia(');
     $mediaPausePos = strpos($media, 'pauseConversation', $providerPos === false ? 0 : $providerPos);
     $assert($providerPos !== false && $mediaPausePos !== false && $mediaPausePos > $providerPos, 'Pausa do bot na mídia está antes do envio.');
+});
+
+$test('Reaction Engine mantém fronteiras de estado e retry terminal', static function () use ($read, $assert): void {
+    $locks = $read('Services/Send_lock_service.php');
+    $reactionService = $read('Services/Message_reaction_service.php');
+    $reactionModel = $read('Models/Chat_message_reactions_model.php');
+    $attemptModel = $read('Models/Chat_message_reaction_attempts_model.php');
+    $webhookModel = $read('Models/Chat_webhook_logs_model.php');
+    $chat = $read('Services/Chat_service.php');
+    $jobs = $read('Services/Integration_job_service.php');
+    foreach (['nameForReaction', 'acquireReaction', 'releaseReaction'] as $needle) {
+        $assert(str_contains($locks, $needle), 'lock por instance/message/reactor ausente: ' . $needle);
+    }
+    foreach (['confirmAttemptState', 'attemptCanRecoverState', 'previous_source_attempt_id'] as $needle) {
+        $assert(str_contains($reactionService, $needle), 'confirmação serializada/previous state ausente: ' . $needle);
+    }
+    foreach (['transBegin', 'transRollback', 'appendChange'] as $needle) {
+        $assert(str_contains($reactionModel, $needle), 'atomicidade V011/change cursor ausente: ' . $needle);
+    }
+    $assert(substr_count($chat, 'confirmAttemptState') >= 2, 'Chat_service não usa confirmação serializada no envio e no receipt');
+    $identityLockPos = strpos($chat, 'acquireReaction((int) $instance');
+    $providerReactionPos = strpos($chat, '$provider->sendReaction');
+    $outboundConfirmPos = strpos($chat, 'confirmAttemptState($attemptId, $providerEventId, true)');
+    $assert($identityLockPos !== false && $providerReactionPos !== false && $outboundConfirmPos !== false
+        && $identityLockPos < $providerReactionPos && $providerReactionPos < $outboundConfirmPos, 'envio outbound não permanece serializado antes do provider e até a confirmação');
+    $assert(str_contains($reactionService, 'operationOrderAt($freshAttempt)'), 'rollback não usa a ordem original da tentativa');
+    $assert(str_contains($webhookModel, 'find_terminal') && str_contains($chat, 'terminalWebhookResult'), 'redelivery terminal não possui consulta/guarda explícita por dedupe key');
+    foreach (['retry_exhausted', 'markWebhookRetryExhausted', 'processed_at\' => $now'] as $needle) {
+        $assert(str_contains($jobs, $needle), 'retry terminal de webhook ausente: ' . $needle);
+    }
+    $assert(str_contains($attemptModel, 'if ($currentState === \'rejected\'') && str_contains($attemptModel, 'providerAt === null'), 'state machine V012 protege rejeição terminal e timestamp existente');
 });
 
 echo "\n{$passed} passed, " . count($failures) . " failed.\n";

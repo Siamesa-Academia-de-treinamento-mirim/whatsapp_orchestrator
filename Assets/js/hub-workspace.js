@@ -6,12 +6,26 @@
     if (!app || !bridge) return;
 
     var config = bridge.getConfig ? bridge.getConfig() : {};
+    var mediaPolicy = window.ImpulsoMediaPolicy || {};
     var workspace = {
+        pendingAttachments: [],
+        pendingByConversation: {},
         pendingAttachment: null,
         pendingAttachmentUrl: '',
         composerMode: 'reply',
         mediaRecorder: null,
         mediaChunks: [],
+        mediaStream: null,
+        recordingTimer: null,
+        recordingStartedAt: 0,
+        recordingConversationId: null,
+        recordingToken: 0,
+        recordingDiscarded: false,
+        recordingAudioContext: null,
+        recordingAnalyser: null,
+        recordingAnalyserSource: null,
+        recordingAnimationFrame: null,
+        recordingWaveformCanvas: null,
         campaignStep: 1,
         contactPage: 1,
         contactHasMore: true,
@@ -38,6 +52,11 @@
         return text(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
     }
     function iconRefresh() { if (bridge.replaceIcons) bridge.replaceIcons(); }
+    function syncPopoverTrigger(action, open) {
+        document.querySelectorAll('[data-impulso-action="' + action + '"]').forEach(function (trigger) {
+            trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+        });
+    }
     function toast(title, message, icon) { bridge.toast(title, message, icon || 'check-circle'); }
     function endpoint(name) { return bridge.endpoint ? bridge.endpoint(name) : ''; }
     function endpointWithId(name, id, suffix) { return bridge.endpointWithId ? bridge.endpointWithId(name, id, suffix || '') : ''; }
@@ -63,9 +82,23 @@
     function payloadData(payload, fallback) { return payload && payload.data != null ? payload.data : fallback; }
     function backendError(error, action) {
         var message = error && error.message ? error.message : 'Não foi possível concluir a ação.';
+        if (error && error.details && error.details.code) message += ' [' + error.details.code + ']';
         if (error && error.status === 404) message = 'O recurso solicitado não foi encontrado.';
         if (error && error.status === 405) message = 'Esta ação não é aceita pelo servidor.';
         toast('Ação não concluída', message, 'alert-triangle');
+    }
+    function mediaResultState(result, fallback) {
+        result = result || {};
+        var details = result.details && typeof result.details === 'object' ? result.details : {};
+        var metadata = result.metadata && typeof result.metadata === 'object' ? result.metadata : {};
+        var state = text(result.idempotency_state || metadata.send_state || details.idempotency_state || '');
+        if (['retryable_failure', 'ambiguous_failure', 'rejected', 'not_attempted', 'idempotent_success'].indexOf(state) >= 0) return state;
+        if (fallback) return fallback;
+        var status = text(result.status || '');
+        if (['sent', 'idempotent'].indexOf(status) >= 0) return 'idempotent_success';
+        if (status === 'rejected') return 'rejected';
+        if (status === 'not_attempted') return 'not_attempted';
+        return 'ambiguous_failure';
     }
     function formatBytes(bytes) {
         bytes = Number(bytes || 0);
@@ -73,6 +106,19 @@
         var units = ['B', 'KB', 'MB', 'GB'];
         var index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
         return (bytes / Math.pow(1024, index)).toFixed(index ? 1 : 0) + ' ' + units[index];
+    }
+    function attachmentStateLabel(state) {
+        return ({
+            queued: 'pronto para enviar',
+            validating: 'validando',
+            converting: 'convertendo e enviando',
+            sending: 'enviando',
+            sent: 'enviado',
+            retryable_failure: 'falhou; pode tentar novamente',
+            ambiguous_failure: 'envio nao confirmado',
+            rejected: 'rejeitado',
+            not_attempted: 'nao enviado'
+        })[text(state)] || text(state || 'aguardando');
     }
     function activeConversation() { return bridge.getActiveConversation ? bridge.getActiveConversation() : null; }
     function activeState() { return bridge.getState ? bridge.getState() : {}; }
@@ -347,51 +393,226 @@
         }
         panel.classList.toggle('impulso-hidden');
     }
-    function clearAttachment() {
-        if (workspace.pendingAttachmentUrl) { try { URL.revokeObjectURL(workspace.pendingAttachmentUrl); } catch (error) {} }
-        workspace.pendingAttachment = null; workspace.pendingAttachmentUrl = '';
-        var input = byId('impulso-attachment-input'); if (input) input.value = '';
-        var preview = byId('impulso-attachment-preview'); if (preview) { preview.innerHTML = ''; preview.classList.add('impulso-hidden'); }
+    function mediaPolicyFor(file) {
+        var conversation = activeConversation() || {};
+        var capabilities = conversation.capabilities || (conversation.instance_details && conversation.instance_details.capabilities) || {};
+        var mime = text(file && file.type).toLowerCase();
+        var kind = mime.indexOf('image/') === 0 ? 'image' : mime.indexOf('audio/') === 0 ? 'audio' : mime.indexOf('video/') === 0 ? 'video' : 'document';
+        return { kind: kind, policy: capabilities.media && capabilities.media[kind] ? capabilities.media[kind] : null };
     }
-    function setAttachment(file) {
-        clearAttachment();
-        if (!file) return;
-        workspace.pendingAttachment = file;
-        workspace.pendingAttachmentUrl = URL.createObjectURL(file);
+    function attachmentClientId(file, index) {
+        var random = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : (Date.now() + '-' + index + '-' + Math.random().toString(16).slice(2));
+        return 'media-' + random.replace(/[^A-Za-z0-9._:-]/g, '').slice(0, 150);
+    }
+    function activeConversationId() {
+        var conversation = activeConversation();
+        return conversation ? Number(conversation.id || 0) : 0;
+    }
+    function rememberPendingAttachments() {
+        var id = activeConversationId();
+        if (id > 0) workspace.pendingByConversation[id] = workspace.pendingAttachments;
+    }
+    function renderRecordingPreview() {
+        var preview = byId('impulso-attachment-preview');
+        if (!preview) return;
+        preview.innerHTML = '<div class="impulso-recording-preview"><canvas id="impulso-recording-waveform" width="320" height="42" aria-label="Forma de onda da gravação"></canvas><span class="impulso-recording-status">Gravando 0:00</span><small>Finalize para ouvir, descartar ou enviar.</small></div>';
+        preview.classList.remove('impulso-hidden');
+        workspace.recordingWaveformCanvas = byId('impulso-recording-waveform');
+    }
+    function drawRecordingWaveform() {
+        var analyser = workspace.recordingAnalyser;
+        var canvas = workspace.recordingWaveformCanvas;
+        if (!analyser || !canvas || !canvas.getContext) return;
+        var context = canvas.getContext('2d');
+        var values = new Uint8Array(analyser.fftSize);
+        analyser.getByteTimeDomainData(values);
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.strokeStyle = '#1F93FF';
+        context.lineWidth = 2;
+        context.beginPath();
+        values.forEach(function (value, index) {
+            var x = index / Math.max(1, values.length - 1) * canvas.width;
+            var y = (value / 255) * canvas.height;
+            if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+        });
+        context.stroke();
+        workspace.recordingAnimationFrame = window.requestAnimationFrame(drawRecordingWaveform);
+    }
+    function stopRecordingResources(options) {
+        options = options || {};
+        if (workspace.recordingTimer) { window.clearInterval(workspace.recordingTimer); workspace.recordingTimer = null; }
+        if (workspace.recordingAnimationFrame) { window.cancelAnimationFrame(workspace.recordingAnimationFrame); workspace.recordingAnimationFrame = null; }
+        if (workspace.recordingAnalyserSource) { try { workspace.recordingAnalyserSource.disconnect(); } catch (error) {} workspace.recordingAnalyserSource = null; }
+        if (workspace.recordingAnalyser) { try { workspace.recordingAnalyser.disconnect(); } catch (error) {} workspace.recordingAnalyser = null; }
+        if (workspace.recordingAudioContext) { try { workspace.recordingAudioContext.close(); } catch (error) {} workspace.recordingAudioContext = null; }
+        if (workspace.mediaStream) { workspace.mediaStream.getTracks().forEach(function (track) { track.stop(); }); workspace.mediaStream = null; }
+        workspace.recordingWaveformCanvas = null;
+        workspace.recordingStartedAt = 0;
+        if (options.invalidate) workspace.recordingToken += 1;
+        if (options.discard) workspace.recordingDiscarded = true;
+    }
+    /* Corrective media-state renderer. Kept local to the existing composer. */
+    function renderAttachmentPreview() {
         var preview = byId('impulso-attachment-preview'); if (!preview) return;
-        var visual = file.type.indexOf('image/') === 0 ? '<img src="' + escapeHtml(workspace.pendingAttachmentUrl) + '" alt="Prévia">' : '<span class="impulso-media-icon"><i data-feather="' + (file.type.indexOf('audio/') === 0 ? 'volume-2' : 'file-text') + '"></i></span>';
-        preview.innerHTML = visual + '<div class="impulso-attachment-preview-copy"><strong>' + escapeHtml(file.name || 'Áudio gravado') + '</strong><span>' + escapeHtml(file.type || 'arquivo') + ' · ' + formatBytes(file.size) + '</span></div><button class="impulso-icon-button btn btn-default" type="button" data-impulso-action="remove-attachment"><i data-feather="x"></i></button>';
-        preview.classList.remove('impulso-hidden'); iconRefresh();
+        var rows = workspace.pendingAttachments.map(function (item) {
+            var file = item.file; var mime = text(file.type).toLowerCase();
+            var visual = mime.indexOf('image/') === 0 ? '<img src="' + escapeHtml(item.url) + '" alt="Preview">' : mime.indexOf('audio/') === 0 ? '<audio controls preload="metadata" src="' + escapeHtml(item.url) + '"></audio>' : '<span class="impulso-media-icon"><i data-feather="' + (mime.indexOf('video/') === 0 ? 'film' : 'file-text') + '"></i></span>';
+            var state = text(item.state || 'queued');
+            var errorText = item.error || (state === 'ambiguous_failure' ? 'Envio nao confirmado; verifique o canal antes de tentar novamente.' : '');
+            var error = errorText ? '<small class="impulso-attachment-error">' + escapeHtml(errorText) + '</small>' : '';
+            var retry = ['retryable_failure', 'not_attempted'].indexOf(state) >= 0 ? '<button class="btn btn-link btn-sm" type="button" data-impulso-action="retry-attachment" data-attachment-id="' + escapeHtml(item.id) + '">Tentar novamente</button>' : '';
+            return '<div class="impulso-attachment-item" data-attachment-id="' + escapeHtml(item.id) + '" data-state="' + escapeHtml(state) + '">' + visual + '<div class="impulso-attachment-preview-copy"><strong>' + escapeHtml(file.name || 'Audio gravado') + '</strong><span>' + escapeHtml(file.type || 'arquivo') + ' · ' + formatBytes(file.size) + (item.voiceNote ? ' · nota de voz' : '') + ' · ' + escapeHtml(attachmentStateLabel(state)) + '</span>' + error + retry + '</div><button class="impulso-icon-button btn btn-default" type="button" data-impulso-action="remove-attachment" data-attachment-id="' + escapeHtml(item.id) + '" aria-label="Remover anexo"><i data-feather="x"></i></button></div>';
+        }).join('');
+        preview.innerHTML = rows;
+        preview.classList.toggle('impulso-hidden', !rows);
+        workspace.pendingAttachment = workspace.pendingAttachments[0] ? workspace.pendingAttachments[0].file : null;
+        workspace.pendingAttachmentUrl = workspace.pendingAttachments[0] ? workspace.pendingAttachments[0].url : '';
+        rememberPendingAttachments();
+        iconRefresh();
     }
-    function sendAttachment() {
-        var conversation = activeConversation(); var file = workspace.pendingAttachment; var input = byId('impulso-message-input');
-        if (!conversation || !file) return Promise.resolve(false);
-        var form = new FormData();
-        form.append('file', file, file.name || ('audio-' + Date.now() + '.webm'));
-        form.append('caption', input ? input.value.trim() : '');
-        form.append('client_message_id', 'media-' + Date.now() + '-' + Math.random().toString(16).slice(2));
-        var send = byId('impulso-send-message'); setBusy(send, true, 'Enviando');
-        return api(endpointWithId('conversations', conversation.id, '/attachments'), { method: 'POST', body: form }).then(function (payload) {
-            var message = bridge.normalizeMessage(payloadData(payload, {}));
-            bridge.mergeMessages([message], false); bridge.renderMessages({ forceBottom: true });
-            if (input) input.value = ''; clearAttachment();
-            toast('Mídia enviada', 'O arquivo foi enviado pelo WhatsApp.', 'check-circle');
-            return true;
-        }).catch(function (error) { backendError(error, 'envio de mídia'); return false; }).finally(function () { setBusy(send, false); if (bridge.updateComposerState) bridge.updateComposerState(); });
+    /* Corrective attachment state, conversation binding and partial-failure UX. */
+    function clearAttachment() {
+        stopRecordingResources({ invalidate: true, discard: true });
+        workspace.pendingAttachments.forEach(function (item) { try { URL.revokeObjectURL(item.url); } catch (error) {} });
+        var id = activeConversationId();
+        if (id > 0) delete workspace.pendingByConversation[id];
+        workspace.pendingAttachments = []; workspace.pendingAttachment = null; workspace.pendingAttachmentUrl = '';
+        var input = byId('impulso-attachment-input'); if (input) input.value = '';
+        renderAttachmentPreview();
     }
-    function sendInternalNote() {
-        var conversation = activeConversation(); var input = byId('impulso-message-input'); var note = input ? input.value.trim() : '';
-        if (!conversation || !note) { toast('Nota vazia', 'Digite o conteúdo da nota interna.', 'alert-circle'); return; }
-        var send = byId('impulso-send-message'); setBusy(send, true, 'Salvando');
-        api(endpointWithId('conversations', conversation.id, '/notes'), { method: 'POST', body: { content: note } }).then(function () { input.value = ''; toast('Nota adicionada', 'A nota interna foi registrada.', 'file-text'); bridge.loadMessages('after', false); }).catch(function (error) { backendError(error, 'notas internas'); }).finally(function () { setBusy(send, false); });
+    function removeAttachment(id) {
+        var keep = [];
+        workspace.pendingAttachments.forEach(function (item) {
+            if (String(item.id) === String(id)) { try { URL.revokeObjectURL(item.url); } catch (error) {} } else keep.push(item);
+        });
+        workspace.pendingAttachments = keep; renderAttachmentPreview();
     }
-    function composerSubmit(event) {
-        if (workspace.pendingAttachment || workspace.composerMode === 'note') {
-            if (event) { event.preventDefault(); event.stopImmediatePropagation(); }
-            if (workspace.pendingAttachment) sendAttachment(); else sendInternalNote();
-            return true;
+    function mediaInteractionAllowed() {
+        var conversation = activeConversation();
+        var permissions = config.permissions || {};
+        var capabilities = conversation && conversation.capabilities || {};
+        return !!conversation && (!Object.keys(permissions).length || permissions.send === true) && conversation.instance_status === 'connected'
+            && capabilities.actions && capabilities.actions.send_media === true;
+    }
+    function policyAllowsFile(file, descriptor, options) {
+        var policy = descriptor.policy;
+        if (!policy || policy.enabled !== true) return false;
+        if (typeof mediaPolicy.allowsFile === 'function') return mediaPolicy.allowsFile(file, policy, options || {});
+        var mime = text(file && file.type).toLowerCase().trim().split(';', 1)[0].trim();
+        var allowed = options && options.recording ? (policy.recording_input_mime_types || []) : (policy.accepted_mime_types || []);
+        return allowed.some(function (candidate) { return text(candidate).toLowerCase().trim().split(';', 1)[0].trim() === mime; });
+    }
+    function setAttachments(files, options) {
+        options = options || {};
+        var conversationId = Number(options.conversationId || activeConversationId());
+        if (!conversationId || conversationId !== activeConversationId()) {
+            toast('Attachment blocked', 'The active conversation changed before this file was added.', 'alert-triangle');
+            return [];
         }
-        return false;
+        if (!mediaInteractionAllowed() || workspace.composerMode === 'note') {
+            toast('Attachment blocked', workspace.composerMode === 'note' ? 'Notes internas nao enviam midia.' : 'O canal atual nao permite envio de midia.', 'file-minus');
+            return [];
+        }
+        var added = [];
+        Array.prototype.slice.call(files || []).forEach(function (file, index) {
+            if (!file) return;
+            var descriptor = mediaPolicyFor(file); var policy = descriptor.policy;
+            if (!policyAllowsFile(file, descriptor, options)) { toast('Attachment blocked', 'Este tipo de midia nao e aceito neste canal.', 'alert-circle'); return; }
+            if (policy && Number(policy.max_bytes || 0) && file.size > Number(policy.max_bytes)) { toast('File too large', 'The attachment exceeds the channel limit.', 'alert-circle'); return; }
+            var item = { id: attachmentClientId(file, index), file: file, url: URL.createObjectURL(file), kind: descriptor.kind, voiceNote: !!options.voiceNote, recording: !!options.recording, conversationId: conversationId, state: 'queued', idempotencyState: null, error: '', sendContext: null };
+            workspace.pendingAttachments.push(item);
+            added.push(item);
+        });
+        renderAttachmentPreview();
+        return added;
+    }
+    function sendAttachment(selectedIds) {
+        var options = arguments.length > 1 && arguments[1] ? arguments[1] : {};
+        var conversation = activeConversation();
+        var selected = Array.isArray(selectedIds) && selectedIds.length ? selectedIds.map(function (id) { return String(id); }) : null;
+        var attachments = workspace.pendingAttachments.filter(function (item) { return !selected || selected.indexOf(String(item.id)) >= 0; });
+        if (!conversation || !attachments.length) return Promise.resolve(false);
+        if (workspace.composerMode === 'note') {
+            return Promise.resolve({ sent: 0, failed: attachments.length, captionSent: false, replySent: false, blocked: true });
+        }
+        if (!mediaInteractionAllowed()) {
+            return Promise.resolve({ sent: 0, failed: attachments.length, captionSent: false, replySent: false, blocked: true });
+        }
+        var conversationId = Number(conversation.id || 0);
+        if (attachments.some(function (item) { return Number(item.conversationId || 0) !== conversationId; })) {
+            attachments.forEach(function (item) { item.state = 'failed'; item.error = 'Attachment belongs to another conversation and was not sent.'; });
+            renderAttachmentPreview();
+            return Promise.resolve(false);
+        }
+        attachments.forEach(function (item) { item.state = 'validating'; item.error = ''; });
+        renderAttachmentPreview();
+        attachments.forEach(function (item) { item.state = item.recording || item.voiceNote ? 'converting' : 'sending'; });
+        renderAttachmentPreview();
+        var form = new FormData();
+        var input = byId('impulso-message-input');
+        var caption = options.caption != null ? text(options.caption).trim() : (input ? input.value.trim() : '');
+        var replyToMessageId = Number(options.replyToMessageId || 0);
+        var batchId = 'batch-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+        var batchItems = attachments.map(function (item, index) {
+            if (!item.sendContext) item.sendContext = { client_message_id: item.id, caption: index === 0 ? caption : '', reply_to_message_id: replyToMessageId || 0 };
+            var logical = item.sendContext;
+            if (attachments.length > 1) form.append('files[]', item.file, item.file.name || ('media-' + index));
+            return { client_message_id: item.id, caption: text(logical.caption || ''), kind: item.kind, voice_note: item.voiceNote, recording: item.recording, reply_to_message_id: Number(logical.reply_to_message_id || 0) || undefined };
+        });
+        if (attachments.length === 1) {
+            var one = attachments[0]; var logicalOne = one.sendContext || { client_message_id: one.id, caption: caption, reply_to_message_id: replyToMessageId || 0 }; one.sendContext = logicalOne; form.append('file', one.file, one.file.name || 'media'); form.append('caption', text(logicalOne.caption || '')); form.append('client_message_id', one.id); form.append('kind', one.kind); form.append('voice_note', one.voiceNote ? '1' : '0'); form.append('recording', one.recording ? '1' : '0'); if (Number(logicalOne.reply_to_message_id || 0)) form.append('reply_to_message_id', String(logicalOne.reply_to_message_id));
+        } else { form.append('items', JSON.stringify(batchItems)); form.append('batch_id', batchId); }
+        var send = byId('impulso-send-message'); setBusy(send, true, 'Enviando');
+        var url = endpointWithId('conversations', conversation.id, attachments.length > 1 ? '/attachments/batch' : '/attachments');
+        return api(url, { method: 'POST', body: form }).then(function (payload) {
+            var data = payloadData(payload, {});
+            var results = attachments.length === 1 ? [{ status: data.status === 'failed' ? 'failed' : 'sent', idempotency_state: mediaResultState(data), client_message_id: attachments[0].id, message: data, error: data.delivery_error || '', details: data.details || {} }] : (Array.isArray(data.items) ? data.items : []);
+            var succeeded = 0; var failed = 0;
+            results.forEach(function (result, index) {
+                var item = attachments[index] || workspace.pendingAttachments.find(function (candidate) { return candidate.id === result.client_message_id; });
+                if (!item) return;
+                var resultStatus = text(result.status || 'failed');
+                var resultState = mediaResultState(result);
+                item.idempotencyState = resultState;
+                if (resultState === 'idempotent_success' || ['sent', 'idempotent'].indexOf(resultStatus) >= 0) {
+                    item.state = 'sent'; item.error = ''; succeeded += 1;
+                    if (result.message) bridge.mergeMessages([bridge.normalizeMessage(result.message)], false);
+                } else {
+                    item.state = resultState;
+                    item.error = text(result.error || (resultState === 'not_attempted' ? 'Nao enviado porque outro anexo falhou na validacao.' : resultState === 'ambiguous_failure' ? 'Envio nao confirmado; verifique o canal antes de tentar novamente.' : 'O provedor nao aceitou este anexo.'));
+                    if (bridge.reconcileServiceWindowError && result.details) bridge.reconcileServiceWindowError({ details: result.details, message: result.error || '' }, conversationId);
+                    failed += 1;
+                }
+            });
+            if (succeeded) {
+                var completedIds = attachments.filter(function (item) { return item.state === 'sent'; }).map(function (item) { return item.id; });
+                completedIds.forEach(removeAttachment);
+                bridge.renderMessages({ forceBottom: true });
+            }
+            renderAttachmentPreview();
+            if (!succeeded) toast('Midia nao enviada', 'Nenhum anexo foi aceito. Revise os erros exibidos.', 'alert-triangle');
+            else if (failed) toast('Resultado parcial', succeeded + ' anexo(s) enviado(s); ' + failed + ' mantido(s) para revisao.', 'alert-triangle');
+            else toast('Midia enviada', 'O anexo foi aceito pelo canal.', 'check-circle');
+            return { sent: succeeded, failed: failed, captionSent: succeeded > 0 && attachments[0] && attachments[0].state === 'sent' && text((attachments[0].sendContext || {}).caption).trim() !== '', replySent: succeeded > 0 && attachments.some(function (item) { return item.state === 'sent' && Number((item.sendContext || {}).reply_to_message_id || 0) > 0; }), results: results };
+        }).catch(function (error) {
+            var details = error && error.details && typeof error.details === 'object' ? error.details : {};
+            if (bridge.reconcileServiceWindowError) bridge.reconcileServiceWindowError(error, conversationId);
+            var conversionFailure = ['MEDIA_FFMPEG_MISSING', 'MEDIA_FFPROBE_MISSING', 'MEDIA_CONVERSION_FAILED', 'MEDIA_CONVERSION_OUTPUT_INVALID'].indexOf(text(details.code)) >= 0;
+            var fallbackState = details.retryable === true || conversionFailure ? 'retryable_failure' : (error && Number(error.status) === 409 ? 'ambiguous_failure' : 'rejected');
+            attachments.forEach(function (item) { item.state = mediaResultState(details, fallbackState); item.idempotencyState = item.state; item.error = details.code ? (error.message || 'Falha no envio da midia.') + ' [' + details.code + ']' : (error.message || 'Falha no envio da midia.'); });
+            renderAttachmentPreview();
+            backendError(error, 'media send');
+            return { sent: 0, failed: attachments.length, captionSent: false, replySent: false, results: [] };
+        }).finally(function () { setBusy(send, false); if (bridge.updateComposerState) bridge.updateComposerState(); });
+    }
+    function retryAttachment(id) {
+        var item = workspace.pendingAttachments.find(function (candidate) { return String(candidate.id) === String(id); });
+        if (!item) return;
+        if (['retryable_failure', 'not_attempted'].indexOf(String(item.state)) < 0) {
+            toast('Tentativa bloqueada', item.state === 'ambiguous_failure' ? 'Envio nao confirmado; verifique o canal antes de tentar novamente.' : 'Este anexo foi rejeitado e nao pode ser reenviado com seguranca.', 'shield');
+            return;
+        }
+        item.state = 'queued'; item.error = ''; renderAttachmentPreview(); return sendAttachment([id]);
     }
     function setComposerMode(mode) {
         workspace.composerMode = mode === 'note' ? 'note' : 'reply';
@@ -402,24 +623,114 @@
     }
     function startVoiceRecording() {
         var button = byId('impulso-voice-button');
-        if (workspace.mediaRecorder && workspace.mediaRecorder.state === 'recording') { workspace.mediaRecorder.stop(); return; }
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) { toast('Gravação indisponível', 'Este navegador não oferece suporte à gravação de áudio.', 'mic-off'); return; }
+        var conversationId = activeConversationId();
+        if (!conversationId) { toast('Nenhuma conversa', 'Selecione uma conversa antes de gravar.', 'alert-circle'); return; }
+        var audioPolicy = mediaPolicyFor({ type: 'audio/webm' }).policy;
+        if (workspace.composerMode === 'note' || !mediaInteractionAllowed() || !audioPolicy || audioPolicy.enabled !== true || audioPolicy.voice_note !== true) {
+            toast('Gravacao indisponivel', 'Notas de voz nao estao disponiveis neste canal.', 'mic-off');
+            return;
+        }
+        if (workspace.mediaRecorder && workspace.mediaRecorder.state === 'recording') {
+            try { workspace.mediaRecorder.stop(); } catch (error) { stopRecordingResources({ invalidate: true, discard: true }); }
+            return;
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) { toast('Gravacao indisponivel', 'Este navegador nao oferece gravacao de audio.', 'mic-off'); return; }
+        var token = ++workspace.recordingToken;
+        workspace.recordingConversationId = conversationId;
+        workspace.recordingDiscarded = false;
         navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
-            workspace.mediaChunks = [];
-            workspace.mediaRecorder = new MediaRecorder(stream);
-            workspace.mediaRecorder.addEventListener('dataavailable', function (event) { if (event.data && event.data.size) workspace.mediaChunks.push(event.data); });
-            workspace.mediaRecorder.addEventListener('stop', function () {
+            if (token !== workspace.recordingToken || activeConversationId() !== conversationId) {
                 stream.getTracks().forEach(function (track) { track.stop(); });
-                if (button) { button.classList.remove('is-recording'); button.innerHTML = '<i data-feather="mic"></i>'; }
-                var blob = new Blob(workspace.mediaChunks, { type: workspace.mediaRecorder.mimeType || 'audio/webm' });
-                var file = new File([blob], 'audio-' + new Date().toISOString().replace(/[:.]/g, '-') + '.webm', { type: blob.type });
-                setAttachment(file); iconRefresh();
+                return;
+            }
+            var chunks = [];
+            workspace.mediaChunks = chunks;
+            workspace.mediaStream = stream;
+            workspace.recordingStartedAt = Date.now();
+            var capability = mediaPolicyFor({ type: 'audio/webm' }).policy || {};
+            var preferred = (capability.recording_input_mime_types || []).map(function (mime) { return mime + ';codecs=opus'; }).concat(['audio/webm;codecs=opus', 'audio/webm']);
+            var supported = preferred.filter(function (mime) { return MediaRecorder.isTypeSupported ? MediaRecorder.isTypeSupported(mime) : true; });
+            var recorder = new MediaRecorder(stream, supported.length ? { mimeType: supported[0] } : undefined);
+            workspace.mediaRecorder = recorder;
+            try {
+                var AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (AudioContext) {
+                    workspace.recordingAudioContext = new AudioContext();
+                    workspace.recordingAnalyser = workspace.recordingAudioContext.createAnalyser();
+                    workspace.recordingAnalyser.fftSize = 256;
+                    workspace.recordingAnalyserSource = workspace.recordingAudioContext.createMediaStreamSource(stream);
+                    workspace.recordingAnalyserSource.connect(workspace.recordingAnalyser);
+                }
+            } catch (error) { workspace.recordingAudioContext = null; workspace.recordingAnalyser = null; }
+            recorder.addEventListener('dataavailable', function (event) { if (event.data && event.data.size) chunks.push(event.data); });
+            recorder.addEventListener('stop', function () {
+                var valid = token === workspace.recordingToken && !workspace.recordingDiscarded && activeConversationId() === conversationId;
+                var blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+                stopRecordingResources();
+                workspace.mediaRecorder = null;
+                workspace.mediaChunks = [];
+                if (button) { button.classList.remove('is-recording'); button.innerHTML = '<i data-feather="mic"></i>'; button.title = 'Gravar audio'; }
+                if (!valid || !blob.size) { renderAttachmentPreview(); return; }
+                var file = new File([blob], 'audio-' + new Date().toISOString().replace(/[:.]/g, '-') + '.webm', { type: blob.type || 'audio/webm' });
+                setAttachments([file], { voiceNote: true, recording: true, conversationId: conversationId });
+                iconRefresh();
             });
-            workspace.mediaRecorder.start();
-            if (button) { button.classList.add('is-recording'); button.innerHTML = '<i data-feather="square"></i>'; }
-            toast('Gravando áudio', 'Clique novamente no microfone para finalizar.', 'mic'); iconRefresh();
-        }).catch(function () { toast('Microfone bloqueado', 'Autorize o uso do microfone no navegador.', 'mic-off'); });
+            recorder.start();
+            renderRecordingPreview();
+            if (workspace.recordingAnalyser) drawRecordingWaveform();
+            workspace.recordingTimer = window.setInterval(function () {
+                var seconds = Math.floor((Date.now() - workspace.recordingStartedAt) / 1000);
+                var timer = document.querySelector('.impulso-recording-status');
+                var buttonTimer = document.querySelector('.impulso-recording-timer');
+                var formatted = Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+                if (timer) timer.textContent = 'Gravando ' + formatted;
+                if (buttonTimer) buttonTimer.textContent = formatted;
+                if (button) { button.setAttribute('data-recording-seconds', String(seconds)); button.title = 'Gravando ' + Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0') + ' - clique para parar'; }
+            }, 250);
+            if (button) { button.classList.add('is-recording'); button.innerHTML = '<i data-feather="square"></i><span class="impulso-recording-timer">0:00</span>'; }
+            toast('Gravando', 'Pare para ouvir, descartar ou enviar a nota de voz.', 'mic'); iconRefresh();
+        }).catch(function () { stopRecordingResources({ invalidate: true, discard: true }); toast('Microfone bloqueado', 'Permita o acesso ao microfone no navegador.', 'mic-off'); });
     }
+    function handleConversationChange(change) {
+        change = change || {};
+        var fromId = Number(change.fromId || 0);
+        var toId = Number(change.toId || 0);
+        if (fromId > 0) workspace.pendingByConversation[fromId] = workspace.pendingAttachments;
+        if (workspace.mediaRecorder && workspace.mediaRecorder.state === 'recording') {
+            workspace.recordingDiscarded = true;
+            workspace.recordingToken += 1;
+            try { workspace.mediaRecorder.stop(); } catch (error) {}
+        }
+        stopRecordingResources({ invalidate: true, discard: true });
+        workspace.mediaChunks = [];
+        workspace.recordingConversationId = null;
+        workspace.pendingAttachments = toId > 0 ? (workspace.pendingByConversation[toId] || []) : [];
+        renderAttachmentPreview();
+    }
+    if (bridge.onConversationChange) bridge.onConversationChange(handleConversationChange);
+    window.ImpulsoHubMedia = {
+        setAttachments: setAttachments,
+        sendAttachment: sendAttachment,
+        removeAttachment: removeAttachment,
+        retryAttachment: retryAttachment,
+        clearAttachment: clearAttachment,
+        startVoiceRecording: startVoiceRecording,
+        getAttachments: function () { return workspace.pendingAttachments; },
+        getAttachmentsForConversation: function (conversationId) {
+            conversationId = Number(conversationId || 0);
+            return conversationId > 0 ? (workspace.pendingByConversation[conversationId] || (conversationId === activeConversationId() ? workspace.pendingAttachments : [])) : [];
+        },
+        setComposerMode: setComposerMode
+    };
+    window.addEventListener('pagehide', function () {
+        if (workspace.mediaRecorder && workspace.mediaRecorder.state === 'recording') { try { workspace.mediaRecorder.stop(); } catch (error) {} }
+        stopRecordingResources({ invalidate: true, discard: true });
+        Object.keys(workspace.pendingByConversation).forEach(function (conversationId) {
+            (workspace.pendingByConversation[conversationId] || []).forEach(function (item) { try { URL.revokeObjectURL(item.url); } catch (error) {} });
+        });
+        workspace.pendingAttachments.forEach(function (item) { try { URL.revokeObjectURL(item.url); } catch (error) {} });
+    });
+
     function openMedia(kind, url, title) {
         if (!url) return;
         var stage = byId('impulso-media-stage'); var download = byId('impulso-media-download'); var mediaTitle = byId('impulso-media-title');
@@ -775,7 +1086,8 @@
         if (action === 'emoji') { toggleEmojiPicker(); return true; }
         if (action === 'quick-replies') { toggleQuickReplies(); return true; }
         if (action === 'attach') { var file = byId('impulso-attachment-input'); if (file) file.click(); return true; }
-        if (action === 'remove-attachment') { clearAttachment(); return true; }
+        if (action === 'remove-attachment') { var attachmentId = trigger.getAttribute('data-attachment-id'); if (attachmentId) removeAttachment(attachmentId); else clearAttachment(); return true; }
+        if (action === 'retry-attachment') { var retryId = trigger.getAttribute('data-attachment-id'); if (retryId) retryAttachment(retryId); return true; }
         if (action === 'voice') { startVoiceRecording(); return true; }
         if (action === 'search-history') { var panel = byId('impulso-history-search-panel'); if (panel) { panel.classList.remove('impulso-hidden'); var input = byId('impulso-history-search-input'); if (input) input.focus(); } return true; }
         if (action === 'close-history-search') { var history = byId('impulso-history-search-panel'); if (history) history.classList.add('impulso-hidden'); searchHistory(''); return true; }
@@ -901,26 +1213,22 @@
         var trigger = event.target.closest('[data-impulso-action], [data-impulso-modal-submit], [data-emoji], [data-quick-reply], [data-media-url], [data-context-index], [data-command-action], [data-notification-filter], [data-notification-id], [data-search-tab], [data-campaign-template-message], [data-campaign-run-id]');
         if (!trigger) return;
         if (trigger.hasAttribute('data-campaign-run-id')) { event.preventDefault(); event.stopImmediatePropagation(); selectCampaignRun(trigger.getAttribute('data-campaign-run-id')); return; }
-        if (trigger.hasAttribute('data-emoji')) { event.preventDefault(); event.stopImmediatePropagation(); insertAtCursor(byId(workspace.emojiTarget === 'campaign' ? 'impulso-campaign-message' : 'impulso-message-input'), trigger.getAttribute('data-emoji')); workspace.emojiTarget = 'composer'; byId('impulso-emoji-picker').classList.add('impulso-hidden'); updateCampaignPreview(); return; }
-        if (trigger.hasAttribute('data-quick-reply')) { event.preventDefault(); event.stopImmediatePropagation(); insertAtCursor(byId('impulso-message-input'), trigger.getAttribute('data-quick-reply')); byId('impulso-quick-replies').classList.add('impulso-hidden'); return; }
+        if (trigger.hasAttribute('data-emoji')) { if (trigger.closest('.impulso-composer')) return; event.preventDefault(); event.stopImmediatePropagation(); insertAtCursor(byId(workspace.emojiTarget === 'campaign' ? 'impulso-campaign-message' : 'impulso-message-input'), trigger.getAttribute('data-emoji')); workspace.emojiTarget = 'composer'; byId('impulso-emoji-picker').classList.add('impulso-hidden'); updateCampaignPreview(); return; }
+        if (trigger.hasAttribute('data-quick-reply')) { if (trigger.closest('.impulso-composer')) return; event.preventDefault(); event.stopImmediatePropagation(); insertAtCursor(byId('impulso-message-input'), trigger.getAttribute('data-quick-reply')); byId('impulso-quick-replies').classList.add('impulso-hidden'); return; }
         if (trigger.hasAttribute('data-media-url')) { event.preventDefault(); event.stopImmediatePropagation(); openMedia(trigger.getAttribute('data-media-kind'), trigger.getAttribute('data-media-url'), trigger.getAttribute('data-media-title')); return; }
         if (trigger.hasAttribute('data-context-index')) { event.preventDefault(); event.stopImmediatePropagation(); var item = workspace.activeContext && workspace.activeContext[Number(trigger.getAttribute('data-context-index'))]; closeContextMenu(); if (item && item.action) item.action(); return; }
         if (trigger.hasAttribute('data-command-action')) { event.preventDefault(); event.stopImmediatePropagation(); closeModal(trigger); var command = trigger.getAttribute('data-command-action'); if (command === 'new-conversation') openNewConversation(); if (command === 'new-contact') openNewContact(); if (command === 'new-campaign') openCampaign(); return; }
         if (trigger.hasAttribute('data-search-tab')) { event.preventDefault(); goToTab(trigger.getAttribute('data-search-tab') || 'conversations'); return; }
         if (trigger.hasAttribute('data-campaign-template-message')) { event.preventDefault(); var templateMessage = trigger.getAttribute('data-campaign-template-message') || ''; closeModal(trigger); openCampaign(); window.setTimeout(function () { var message = byId('impulso-campaign-message'); if (message) { message.value = templateMessage; updateCampaignPreview(); } }, 100); return; }
         if (trigger.hasAttribute('data-notification-filter')) { event.preventDefault(); event.stopImmediatePropagation(); filterNotifications(trigger.getAttribute('data-notification-filter') || 'all'); return; }
-        if (trigger.hasAttribute('data-notification-id')) { event.preventDefault(); event.stopImmediatePropagation(); var notificationId = trigger.getAttribute('data-notification-id'); api(endpointWithId('notifications', notificationId, '/read'), { method: 'POST', body: {} }).catch(function () {}); trigger.classList.remove('is-unread'); return; }
+        if (trigger.hasAttribute('data-notification-id')) { event.preventDefault(); event.stopImmediatePropagation(); var notificationId = trigger.getAttribute('data-notification-id'); var notificationKind = trigger.getAttribute('data-notification-kind') || ''; api(endpointWithId('notifications', notificationId, '/read'), { method: 'POST', body: {} }).then(function (payload) { var notification = payloadData(payload, {}); if (notificationKind === 'mention' && notification.resource_type === 'conversation' && Number(notification.resource_id) > 0 && window.ImpulsoHubBridge && window.ImpulsoHubBridge.openConversationById) window.ImpulsoHubBridge.openConversationById(Number(notification.resource_id), { loadAuxiliary: true }); }).catch(function () {}); trigger.classList.remove('is-unread'); return; }
         var submit = trigger.getAttribute('data-impulso-modal-submit'); if (submit && submit !== 'instance') { event.preventDefault(); event.stopImmediatePropagation(); submitForm(submit, trigger); return; }
         var action = trigger.getAttribute('data-impulso-action');
-        if (['emoji','quick-replies','attach','voice','search-history','close-history-search','call-contact','toggle-priority','resolve-conversation','edit-contact','edit-tags','edit-assignment','contact-menu'].indexOf(action) >= 0 || ['global-search','notifications','close-notifications','new-conversation','new-contact','new-campaign','refresh-contacts','view-contact','contact-row-menu','clear-contact-selection','bulk-export-contacts','bulk-tag-contacts','load-more-contacts','campaign-next','campaign-previous','preview-campaign-audience','campaign-variable','campaign-emoji','campaign-attachment','campaign-menu','view-campaign','refresh-campaigns','test-campaign-backend','campaign-templates','campaign-calendar','sync-official-templates','import-contacts','repair-contact-names','remove-attachment','mark-all-notifications-read','manage-quick-replies','load-more-campaign-recipients','edit-viewed-campaign'].indexOf(action) >= 0) {
+        if (['search-history','close-history-search','call-contact','toggle-priority','resolve-conversation','edit-contact','edit-tags','edit-assignment','contact-menu','remove-attachment','retry-attachment'].indexOf(action) >= 0 || ['global-search','notifications','close-notifications','new-conversation','new-contact','new-campaign','refresh-contacts','view-contact','contact-row-menu','clear-contact-selection','bulk-export-contacts','bulk-tag-contacts','load-more-contacts','campaign-next','campaign-previous','preview-campaign-audience','campaign-variable','campaign-emoji','campaign-attachment','campaign-menu','view-campaign','refresh-campaigns','test-campaign-backend','campaign-templates','campaign-calendar','sync-official-templates','import-contacts','repair-contact-names','mark-all-notifications-read','manage-quick-replies','load-more-campaign-recipients','edit-viewed-campaign'].indexOf(action) >= 0) {
             event.preventDefault(); event.stopImmediatePropagation(); handleAction(action, trigger, event);
         }
     }, true);
 
-    var sendButton = byId('impulso-send-message'); if (sendButton) sendButton.addEventListener('click', composerSubmit, true);
-    var messageInput = byId('impulso-message-input'); if (messageInput) messageInput.addEventListener('keydown', function (event) { if (event.key === 'Enter' && !event.shiftKey) composerSubmit(event); }, true);
-    all('[data-composer-mode]').forEach(function (button) { button.addEventListener('click', function (event) { event.preventDefault(); event.stopImmediatePropagation(); setComposerMode(button.getAttribute('data-composer-mode')); }, true); });
-    var attachmentInput = byId('impulso-attachment-input'); if (attachmentInput) attachmentInput.addEventListener('change', function () { setAttachment(this.files && this.files[0]); });
     var historyInput = byId('impulso-history-search-input'); if (historyInput) historyInput.addEventListener('input', function () { searchHistory(this.value); });
     var campaignMessage = byId('impulso-campaign-message'); if (campaignMessage) campaignMessage.addEventListener('input', updateCampaignPreview);
     var campaignName = byId('impulso-campaign-name'); if (campaignName) campaignName.addEventListener('input', updateCampaignPreview);
@@ -953,12 +1261,12 @@
 
     document.addEventListener('keydown', function (event) {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); openGlobalSearch(); }
-        if (event.key === 'Escape') { closeContextMenu(); toggleNotifications(false); var picker = byId('impulso-emoji-picker'); var replies = byId('impulso-quick-replies'); if (picker) picker.classList.add('impulso-hidden'); if (replies) replies.classList.add('impulso-hidden'); }
+        if (event.key === 'Escape') { closeContextMenu(); toggleNotifications(false); var picker = byId('impulso-emoji-picker'); var replies = byId('impulso-quick-replies'); if (picker) { picker.classList.add('impulso-hidden'); picker.setAttribute('aria-expanded', 'false'); } if (replies) { replies.classList.add('impulso-hidden'); replies.setAttribute('aria-expanded', 'false'); } syncPopoverTrigger('emoji', false); syncPopoverTrigger('quick-replies', false); }
     });
     document.addEventListener('click', function (event) {
         if (!event.target.closest('#impulso-context-menu') && !event.target.closest('[data-impulso-action$="menu"]')) closeContextMenu();
-        if (!event.target.closest('#impulso-emoji-picker') && !event.target.closest('[data-impulso-action="emoji"]')) { var picker = byId('impulso-emoji-picker'); if (picker) picker.classList.add('impulso-hidden'); }
-        if (!event.target.closest('#impulso-quick-replies') && !event.target.closest('[data-impulso-action="quick-replies"]')) { var replies = byId('impulso-quick-replies'); if (replies) replies.classList.add('impulso-hidden'); }
+        if (!event.target.closest('#impulso-emoji-picker') && !event.target.closest('[data-impulso-action="emoji"]')) { var picker = byId('impulso-emoji-picker'); if (picker) { picker.classList.add('impulso-hidden'); picker.setAttribute('aria-expanded', 'false'); } syncPopoverTrigger('emoji', false); }
+        if (!event.target.closest('#impulso-quick-replies') && !event.target.closest('[data-impulso-action="quick-replies"]')) { var replies = byId('impulso-quick-replies'); if (replies) { replies.classList.add('impulso-hidden'); replies.setAttribute('aria-expanded', 'false'); } syncPopoverTrigger('quick-replies', false); }
     });
     var backdrop = byId('impulso-drawer-backdrop'); if (backdrop) backdrop.addEventListener('click', function () { toggleNotifications(false); });
 

@@ -169,6 +169,16 @@ class Webhook_normalizer
         $media = $this->extractMedia($root, $data, $message);
         $messageType = $this->extractMessageType($root, $data, $message, $media['node_type']);
         $text = $this->extractText($root, $data, $message, $media['node']);
+        $structured = $this->extractStructuredContent($root, $data, $message, $messageType, $media);
+        if ($messageType === 'reaction' && is_array($structured['reaction'] ?? null)) {
+            $structured['reaction']['reactor_key'] = $fromMe
+                ? 'self'
+                : ($isGroup ? ($participantJid ?: $participantAlternateJid) : ($remoteJid ?: $alternateJid));
+            $structured['reaction']['provider_event_id'] = $externalEventId !== '' ? $externalEventId : $externalMessageId;
+            $structured['reaction']['from_me'] = $fromMe;
+            $structured['reaction']['provider_timestamp'] = $timestamp;
+        }
+        $replyToExternalId = $this->extractReplyToExternalId($root, $data, $message);
         $sourceStatus = $this->normalizeStatus($this->firstScalar([
             $root['status'] ?? null,
             $root['message_status'] ?? null,
@@ -218,6 +228,17 @@ class Webhook_normalizer
             'delivery_error' => $this->firstScalar([
                 $root['delivery_error'] ?? null,
                 $data['delivery_error'] ?? null,
+                $this->path($root, ['error', 'message']),
+                $this->path($data, ['error', 'message']),
+            ]),
+            'delivery_error_code' => $this->firstScalar([
+                $root['delivery_error_code'] ?? null,
+                $root['provider_error_code'] ?? null,
+                $data['delivery_error_code'] ?? null,
+                $data['provider_error_code'] ?? null,
+                $this->path($root, ['error', 'code']),
+                $this->path($data, ['error', 'code']),
+                $this->path($data, ['errors', 0, 'code']),
             ]),
             'timestamp' => $timestamp,
             'text' => $text,
@@ -225,6 +246,15 @@ class Webhook_normalizer
             'media_url' => $media['url'],
             'mime_type' => $media['mime_type'],
             'file_name' => $media['file_name'],
+            'structured_content' => $structured,
+            'context_message_id' => $replyToExternalId !== '' ? $replyToExternalId : null,
+            'reply_to_external_message_id' => $replyToExternalId !== '' ? $replyToExternalId : null,
+            'is_voice_note' => $messageType === 'audio' && (bool) ($structured['attachment']['is_voice_note'] ?? false),
+            'raw_provider_type' => $this->firstScalar([
+                $root['raw_provider_type'] ?? null,
+                $data['raw_provider_type'] ?? null,
+                $messageType,
+            ]),
             'status' => $sourceStatus,
             'message_status' => $mappedStatus,
         ];
@@ -279,7 +309,9 @@ class Webhook_normalizer
         $nodes = [
             'image' => $this->toArray($message['imageMessage'] ?? $data['imageMessage'] ?? []),
             'audio' => $this->toArray($message['audioMessage'] ?? $data['audioMessage'] ?? []),
+            'video' => $this->toArray($message['videoMessage'] ?? $data['videoMessage'] ?? []),
             'document' => $this->toArray($message['documentMessage'] ?? $data['documentMessage'] ?? []),
+            'sticker' => $this->toArray($message['stickerMessage'] ?? $data['stickerMessage'] ?? []),
         ];
         $wrappedDocument = $this->toArray($message['documentWithCaptionMessage'] ?? []);
         if ($nodes['document'] === [] && $wrappedDocument !== []) {
@@ -368,8 +400,29 @@ class Webhook_normalizer
         if (str_contains($type, 'audio') || str_contains($type, 'voice') || $type === 'ptt') {
             return 'audio';
         }
+        if (str_contains($type, 'video')) {
+            return 'video';
+        }
         if (str_contains($type, 'document') || str_contains($type, 'file')) {
             return 'document';
+        }
+        if (str_contains($type, 'sticker')) {
+            return 'sticker';
+        }
+        if ($type === 'location' || str_contains($type, 'location')) {
+            return 'location';
+        }
+        if ($type === 'contact' || $type === 'contacts' || str_contains($type, 'contact')) {
+            return 'contact';
+        }
+        if ($type === 'reaction' || str_contains($type, 'reaction')) {
+            return 'reaction';
+        }
+        if ($type === 'interactive' || $type === 'button' || $type === 'list') {
+            return 'interactive';
+        }
+        if ($type === 'template' || str_contains($type, 'template')) {
+            return 'template';
         }
         if ($type === 'text' || str_contains($type, 'conversation') || str_contains($type, 'extendedtext')) {
             return 'text';
@@ -378,6 +431,12 @@ class Webhook_normalizer
         if (isset($message['conversation']) || isset($message['extendedTextMessage'])) {
             return 'text';
         }
+        if (isset($message['videoMessage'])) return 'video';
+        if (isset($message['stickerMessage'])) return 'sticker';
+        if (isset($message['locationMessage'])) return 'location';
+        if (isset($message['contactMessage']) || isset($message['contactsArrayMessage'])) return 'contact';
+        if (isset($message['reactionMessage'])) return 'reaction';
+        if (isset($message['buttonsResponseMessage']) || isset($message['listResponseMessage'])) return 'interactive';
 
         if (is_scalar($root['message'] ?? null) || is_scalar($data['message'] ?? null)) {
             return 'text';
@@ -407,8 +466,128 @@ class Webhook_normalizer
             $this->path($message, ['extendedTextMessage', 'text']),
             $this->path($message, ['buttonsResponseMessage', 'selectedDisplayText']),
             $this->path($message, ['listResponseMessage', 'title']),
+            $this->path($message, ['reactionMessage', 'text']),
+            $this->path($message, ['locationMessage', 'name']),
+            $this->path($message, ['contactMessage', 'displayName']),
             $mediaNode['caption'] ?? null,
         ]);
+    }
+
+    /**
+     * Keeps structured WhatsApp concepts available to the V2 projector while
+     * limiting them to a small, browser-safe subset.
+     *
+     * @param array{node:array<string,mixed>,node_type:string,url:?string,mime_type:?string,file_name:?string} $media
+     * @return array<string,mixed>
+     */
+    private function extractStructuredContent(array $root, array $data, array $message, string $messageType, array $media): array
+    {
+        foreach ([
+            $this->toArray($root['structured_content'] ?? null),
+            $this->toArray($data['structured_content'] ?? null),
+        ] as $direct) {
+            if ($direct !== []) return $direct;
+        }
+
+        if ($media['node'] !== []) {
+            $node = $media['node'];
+            return ['attachment' => [
+                'kind' => $media['node_type'] !== '' ? $media['node_type'] : $messageType,
+                'provider_media_id' => $this->firstScalar([$node['mediaKey'] ?? null, $node['fileSha256'] ?? null]),
+                'mime_type' => $media['mime_type'],
+                'file_name' => $media['file_name'],
+                'caption' => $this->firstScalar([$node['caption'] ?? null]),
+                'file_size' => is_numeric($node['fileLength'] ?? null) ? (int) $node['fileLength'] : null,
+                'width' => is_numeric($node['width'] ?? null) ? (int) $node['width'] : null,
+                'height' => is_numeric($node['height'] ?? null) ? (int) $node['height'] : null,
+                'duration' => is_numeric($node['seconds'] ?? null) ? (int) $node['seconds'] : null,
+                'is_voice_note' => $messageType === 'audio' && (bool) ($node['ptt'] ?? false),
+            ]];
+        }
+
+        $location = $this->toArray($message['locationMessage'] ?? $data['locationMessage'] ?? $root['location'] ?? []);
+        if ($location !== []) {
+            return ['location' => [
+                'latitude' => $location['degreesLatitude'] ?? $location['latitude'] ?? null,
+                'longitude' => $location['degreesLongitude'] ?? $location['longitude'] ?? null,
+                'name' => $this->firstScalar([$location['name'] ?? null]),
+                'address' => $this->firstScalar([$location['address'] ?? null]),
+            ]];
+        }
+
+        $contact = $this->toArray($message['contactMessage'] ?? $data['contactMessage'] ?? []);
+        $contactList = $message['contactsArrayMessage']['contacts'] ?? $message['contacts'] ?? $data['contacts'] ?? [];
+        if ($contact !== [] || is_array($contactList) && $contactList !== []) {
+            $items = [];
+            foreach ($contact !== [] ? [$contact] : $contactList as $item) {
+                $item = $this->toArray($item);
+                if ($item === []) continue;
+                $items[] = [
+                    'display_name' => $this->firstScalar([$item['displayName'] ?? null, $item['display_name'] ?? null]),
+                    'phones' => $this->vcardValues((string) ($item['vcard'] ?? ''), 'TEL'),
+                    'emails' => $this->vcardValues((string) ($item['vcard'] ?? ''), 'EMAIL'),
+                    'organization' => $this->firstScalar([$item['organization'] ?? null]),
+                ];
+            }
+            return ['contact' => ['contacts' => array_slice($items, 0, 10)]];
+        }
+
+        $interactive = $this->toArray($message['buttonsResponseMessage'] ?? $message['listResponseMessage'] ?? $data['interactive'] ?? []);
+        if ($interactive !== []) {
+            return ['interactive' => [
+                'kind' => isset($message['listResponseMessage']) ? 'list' : 'button',
+                'id' => $this->firstScalar([$interactive['selectedButtonId'] ?? null, $interactive['singleSelectReply']['selectedRowId'] ?? null]),
+                'label' => $this->firstScalar([$interactive['selectedDisplayText'] ?? null, $interactive['singleSelectReply']['title'] ?? null]),
+                'description' => $this->firstScalar([$interactive['description'] ?? null]),
+                'context' => null,
+            ]];
+        }
+
+        $reaction = $this->toArray($message['reactionMessage'] ?? $data['reaction'] ?? []);
+        if ($reaction !== []) {
+            return ['reaction' => [
+                'emoji' => $this->firstScalar([$reaction['text'] ?? null, $reaction['emoji'] ?? null]),
+                'message_id' => $this->firstScalar([$reaction['key']['id'] ?? null, $reaction['messageId'] ?? null]),
+                'removed' => $this->firstScalar([$reaction['text'] ?? null, $reaction['emoji'] ?? null]) === '',
+            ]];
+        }
+
+        return [];
+    }
+
+    private function extractReplyToExternalId(array $root, array $data, array $message): string
+    {
+        return $this->firstScalar([
+            $root['reply_to_external_message_id'] ?? null,
+            $root['context_message_id'] ?? null,
+            $data['reply_to_external_message_id'] ?? null,
+            $data['context_message_id'] ?? null,
+            $this->path($message, ['extendedTextMessage', 'contextInfo', 'stanzaId']),
+            $this->path($message, ['imageMessage', 'contextInfo', 'stanzaId']),
+            $this->path($message, ['audioMessage', 'contextInfo', 'stanzaId']),
+            $this->path($message, ['videoMessage', 'contextInfo', 'stanzaId']),
+            $this->path($message, ['documentMessage', 'contextInfo', 'stanzaId']),
+            $this->path($message, ['stickerMessage', 'contextInfo', 'stanzaId']),
+            $this->path($message, ['locationMessage', 'contextInfo', 'stanzaId']),
+            $this->path($message, ['contactMessage', 'contextInfo', 'stanzaId']),
+            $this->path($message, ['contactsArrayMessage', 'contextInfo', 'stanzaId']),
+            $this->path($message, ['buttonsResponseMessage', 'contextInfo', 'stanzaId']),
+            $this->path($message, ['listResponseMessage', 'contextInfo', 'stanzaId']),
+        ]);
+    }
+
+    /** @return array<int,string> */
+    private function vcardValues(string $vcard, string $field): array
+    {
+        if ($vcard === '') return [];
+        $values = [];
+        foreach (preg_split('/\r?\n/', $vcard) ?: [] as $line) {
+            if (!str_starts_with(strtoupper($line), $field . ':') && !str_starts_with(strtoupper($line), $field . ';')) continue;
+            $value = trim((string) substr($line, strpos($line, ':') + 1));
+            if ($value !== '') $values[] = substr($value, 0, $field === 'TEL' ? 64 : 191);
+            if (count($values) >= 10) break;
+        }
+        return $values;
     }
 
     /** @param array<string, mixed> $normalized */

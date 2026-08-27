@@ -28,14 +28,30 @@ $routes->group('chatwoot_plugin', $route_options, static function ($routes): voi
     $routes->post('api/instances/(:num)/status', 'Instances::status/$1');
 
     $routes->get('api/conversations', 'Conversations::index');
+    $routes->get('api/conversations/assignment-options', 'Conversations::assignment_options');
+    $routes->post('api/conversations/bulk-action', 'Conversations::bulk_action');
     $routes->post('api/conversations', 'Conversations::create');
     $routes->post('api/conversations/sync', 'Conversations::sync');
+    $routes->get('api/conversations/(:num)', 'Conversations::show/$1');
     $routes->get('api/conversations/(:num)/messages', 'Conversations::messages/$1');
     $routes->get('api/conversations/(:num)/group', 'Conversations::group/$1');
     $routes->post('api/conversations/(:num)/messages/sync', 'Conversations::sync_messages/$1');
     $routes->post('api/conversations/(:num)/messages', 'Conversations::send/$1');
+    $routes->post('api/conversations/(:num)/messages/(:num)/reaction', 'Conversations::reaction/$1/$2');
+    $routes->get('api/conversations/(:num)/templates', 'Conversations::templates/$1');
+    $routes->post('api/conversations/(:num)/templates/sync', 'Conversations::sync_templates/$1');
     $routes->post('api/conversations/(:num)/templates', 'Conversations::send_template/$1');
+    $routes->post('api/conversations/(:num)/templates/media', 'Conversations::template_media/$1');
     $routes->post('api/conversations/(:num)/read', 'Conversations::mark_read/$1');
+    $routes->post('api/conversations/(:num)/unread', 'Conversations::mark_unread/$1');
+    $routes->post('api/conversations/(:num)/status', 'Conversations::status/$1');
+    $routes->post('api/conversations/(:num)/snooze', 'Conversations::snooze/$1');
+    $routes->post('api/conversations/(:num)/unsnooze', 'Conversations::unsnooze/$1');
+    $routes->get('api/conversations/(:num)/previous', 'Conversations::previous/$1');
+    $routes->get('api/conversations/(:num)/activity', 'Conversations::activity/$1');
+    $routes->post('api/conversations/(:num)/presence', 'Conversations::presence/$1');
+    $routes->get('api/conversations/(:num)/presence', 'Conversations::presence_show/$1');
+    $routes->post('api/conversations/(:num)/attachments/batch', 'Media::send_batch/$1');
     $routes->post('api/conversations/(:num)/attachments', 'Media::send/$1');
     $routes->post('api/conversations/(:num)/notes', 'Conversations::note/$1');
     $routes->post('api/conversations/(:num)/priority', 'Conversations::priority/$1');
@@ -97,6 +113,10 @@ $routes->group('chatwoot_plugin', $route_options, static function ($routes): voi
     $routes->get('api/notifications', 'Notifications::index');
     $routes->post('api/notifications/read-all', 'Notifications::read_all');
     $routes->post('api/notifications/(:num)/read', 'Notifications::read/$1');
+    $routes->get('api/saved-views', 'Saved_views::index');
+    $routes->post('api/saved-views', 'Saved_views::create');
+    $routes->put('api/saved-views/(:num)', 'Saved_views::update/$1');
+    $routes->delete('api/saved-views/(:num)', 'Saved_views::delete/$1');
     $routes->get('api/search', 'Search::index');
 
     $routes->get('api/session/csrf', 'Api_session::csrf');

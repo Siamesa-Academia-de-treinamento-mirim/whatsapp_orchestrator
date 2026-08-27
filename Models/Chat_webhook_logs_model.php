@@ -99,6 +99,38 @@ class Chat_webhook_logs_model extends Crud_model
             ->countAllResults() > 0;
     }
 
+    /**
+     * Returns a terminal retry record without treating it as a successful
+     * delivery. Terminal retry exhaustion is intentionally distinct from
+     * was_processed(): a redelivery must not reopen the retry cycle.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function find_terminal(string $eventDedupeKey): ?array
+    {
+        $eventDedupeKey = trim($eventDedupeKey);
+        if ($eventDedupeKey === '') {
+            return null;
+        }
+
+        $row = $this->db->table($this->table)
+            ->where('event_dedupe_key', $eventDedupeKey)
+            ->where('success', 0)
+            ->where('deleted', 0)
+            ->where('processed_at IS NOT NULL', null, false)
+            ->get(1)
+            ->getRowArray();
+        if (!$row) {
+            return null;
+        }
+
+        $response = json_decode((string) ($row['response_payload'] ?? ''), true);
+        $isTerminal = (is_array($response) && (!empty($response['retry_exhausted']) || !empty($response['terminal'])))
+            || (string) ($row['error_message'] ?? '') === 'retry_exhausted';
+
+        return $isTerminal ? $row : null;
+    }
+
     public function paginate_logs(array $filters = [], int $page = 1, int $perPage = 50): array
     {
         [$page, $perPage, $offset] = $this->pagination($page, $perPage);

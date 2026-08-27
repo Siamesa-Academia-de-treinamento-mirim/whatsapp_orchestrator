@@ -59,3 +59,34 @@ git diff --check
 - `Services/Campaign_dispatch_service.php`
 - `Libraries/Migration_runner.php`
 - `Database/Migrations/V004_...` a `V009_...`
+
+## Inbox 3 final release handoff
+
+Inbox 3 roadmap status = COMPLETE. Phase 1 complete through Phase 8 complete. No post-roadmap phase is authorized. O estado final preserva Rise/PHP/CodeIgniter + JavaScript modular, contratos V2, adapters Evolution/Meta, Media Engine, Composer, Template Picker, Workflow, Collaboration e detalhe detached da conversa ativa.
+
+V001-V015 sao historicas e imutaveis. V015 e a ultima migration existente; V016 permanece reservada. A Fase 8 nao criou schema.
+
+Nao foram adicionadas features pos-roadmap: SLA, CSAT, reports, Captain/IA generativa, omnichannel, WebSocket, macros engine, round robin, auto-routing ou novas bulk actions.
+
+O picker inline legado e os inputs de raw media link/provider media ID foram removidos somente depois da equivalencia funcional ser coberta pelos testes de Phase 5. Nenhuma limpeza ampla de backend ou alias documentado foi feita na Fase 8.
+
+Validacoes externas ainda dependem de ambiente autorizado: Evolution release smoke, Meta Cloud release smoke, upgrade sobre copia production-like anonimizada, matriz manual em Rise com Chrome/Edge e dois agentes, e Firefox/Safari quando disponiveis. Sem esse ambiente, o resultado correto e `PENDING MANUAL PROVIDER VALIDATION` ou `NOT RUN`, nunca pass implicito.
+
+Comandos de release a partir do diretorio do plugin:
+
+```text
+php Tests/Inbox3/release_regression_test.php
+node Tests/Inbox3/release_regression_test.js
+php Tests/run_unit.php
+php Tests/run_product_static.php
+php Tests/run_inbox3_handoff.php
+php Tests/run_migration_smoke.php
+php Tests/run_service_integration.php
+php Tests/run_refinement_integration.php
+php Tests/run_webhook_http.php
+node --check Assets/js/chatwoot.js
+node --check Assets/js/hub-workspace.js
+git diff --check
+```
+
+A Fase 8 e a fase final do roadmap. Nao iniciar uma Fase 9 sem especificacao explicita.

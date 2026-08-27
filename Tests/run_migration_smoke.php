@@ -34,6 +34,9 @@ $tables = [
     'chat_instances',
     'chat_conversations',
     'chat_messages',
+    'chat_message_reactions',
+    'chat_message_reaction_attempts',
+    'chat_message_reaction_changes',
     'chat_webhook_logs',
     'chat_settings',
     'chat_contacts',
@@ -62,6 +65,9 @@ $tables = [
     'chat_notifications',
     'chat_audit_logs',
     'chat_integration_jobs',
+    'chat_internal_note_mentions',
+    'chat_saved_views',
+    'chat_conversation_presence',
 ];
 
 foreach ($tables as $logicalName) {
@@ -84,12 +90,25 @@ foreach ($tables as $logicalName) {
 
 $requiredIndexes = [
     $db->prefixTable('chat_instances') => ['uq_chat_instance_identifier', 'uq_chat_instance_evolution_name'],
-    $db->prefixTable('chat_conversations') => ['uq_chat_conversation_remote'],
+    $db->prefixTable('chat_conversations') => ['uq_chat_conversation_remote', 'idx_chat_conversation_snooze'],
     $db->prefixTable('chat_messages') => [
         'uq_chat_msg_instance_external',
         'uq_chat_msg_instance_dedupe',
         'uq_chat_msg_conversation_client',
     ],
+    $db->prefixTable('chat_message_reactions') => [
+        'uq_chat_reaction_target_actor',
+        'uq_chat_reaction_client',
+        'idx_chat_reaction_target',
+        'idx_chat_reaction_provider_time',
+        'idx_chat_reaction_source_attempt',
+    ],
+    $db->prefixTable('chat_message_reaction_attempts') => [
+        'uq_chat_reaction_attempt_client',
+        'idx_chat_reaction_attempt_target_created',
+        'idx_chat_reaction_attempt_provider_event',
+    ],
+    $db->prefixTable('chat_message_reaction_changes') => ['idx_chat_reaction_change_message', 'idx_chat_reaction_change_instance'],
     $db->prefixTable('chat_webhook_logs') => ['uq_chat_webhook_event_dedupe'],
     $db->prefixTable('chat_contacts') => ['uq_chat_contact_scope', 'idx_chat_contact_phone'],
     $db->prefixTable('chat_contact_identifiers') => ['uq_chat_contact_identifier'],
@@ -122,8 +141,10 @@ foreach ($requiredIndexes as $table => $expected) {
 $requiredColumns = [
     $db->prefixTable('chat_instances') => ['provider_type', 'meta_phone_number_id', 'meta_waba_id', 'meta_access_token_encrypted', 'meta_verify_token_encrypted', 'meta_app_secret_encrypted'],
     $db->prefixTable('chat_contacts') => ['name_source', 'name_updated_at', 'last_incoming_name'],
-    $db->prefixTable('chat_conversations') => ['contact_id', 'priority', 'assignee_id', 'team_id', 'resolved_at', 'resolved_by', 'conversation_type', 'group_id', 'service_window_expires_at', 'bot_paused_at', 'bot_handoff_reason', 'last_human_message_at', 'last_bot_message_at', 'first_response_at', 'first_response_seconds'],
-    $db->prefixTable('chat_messages') => ['sender_user_id', 'sender_contact_id', 'sender_jid', 'sender_phone', 'sender_name', 'is_group_message', 'reply_to_external_message_id', 'caption', 'file_name', 'file_size', 'media_id', 'is_internal_note', 'delivery_error', 'failed_at'],
+    $db->prefixTable('chat_conversations') => ['contact_id', 'priority', 'assignee_id', 'team_id', 'resolved_at', 'resolved_by', 'conversation_type', 'group_id', 'service_window_expires_at', 'snoozed_until', 'snoozed_by', 'bot_paused_at', 'bot_handoff_reason', 'last_human_message_at', 'last_bot_message_at', 'first_response_at', 'first_response_seconds'],
+    $db->prefixTable('chat_messages') => ['sender_user_id', 'sender_contact_id', 'sender_jid', 'sender_phone', 'sender_name', 'is_group_message', 'reply_to_external_message_id', 'caption', 'file_name', 'file_size', 'media_id', 'is_internal_note', 'delivery_error', 'failed_at', 'delivered_at', 'read_at'],
+    $db->prefixTable('chat_message_reactions') => ['provider_timestamp', 'source_attempt_id', 'state_order_at', 'state_order_kind', 'state_order_key'],
+    $db->prefixTable('chat_message_reaction_attempts') => ['message_id', 'instance_id', 'provider_name', 'client_message_id', 'requested_emoji', 'previous_emoji', 'previous_active', 'previous_from_me', 'previous_source_attempt_id', 'requested_active', 'send_state', 'provider_event_id', 'provider_status', 'provider_error_code', 'provider_error_message', 'provider_status_at', 'actor_user_id', 'created_at', 'updated_at', 'deleted'],
     $db->prefixTable('chat_campaigns') => ['campaign_type', 'template_id', 'template_parameters_json', 'dispatch_mode', 'rate_limit_per_minute', 'started_at', 'finished_at'],
     $db->prefixTable('chat_campaign_runs') => ['occurrence_key', 'scheduled_at', 'recipient_count'],
 ];
@@ -180,7 +201,7 @@ $db->table($settingsTable)->insert(['setting_key' => $sentinel, 'setting_value' 
 $runner->migrate();
 $preserved = $db->table($settingsTable)->where('setting_key', $sentinel)->where('setting_value', 'preserved')->countAllResults() === 1;
 $db->table($settingsTable)->where('setting_key', $sentinel)->delete();
-if (!$preserved || $runner->currentVersion() !== 9) {
+if (!$preserved || $runner->currentVersion() !== 15) {
     fwrite(STDERR, "Migration rerun was not idempotent or did not preserve data.\n");
     exit(1);
 }

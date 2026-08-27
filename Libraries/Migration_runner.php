@@ -13,6 +13,12 @@ use Chatwoot_plugin\Database\Migrations\V006_Bot_versions_and_campaign_runs;
 use Chatwoot_plugin\Database\Migrations\V007_Campaign_run_recipients;
 use Chatwoot_plugin\Database\Migrations\V008_Migrate_legacy_campaign_dispatch;
 use Chatwoot_plugin\Database\Migrations\V009_Retire_legacy_ai_reports_and_n8n;
+use Chatwoot_plugin\Database\Migrations\V010_Add_message_delivery_timestamps;
+use Chatwoot_plugin\Database\Migrations\V011_Create_chat_message_reactions;
+use Chatwoot_plugin\Database\Migrations\V012_Create_chat_message_reaction_attempts;
+use Chatwoot_plugin\Database\Migrations\V013_Harden_chat_message_reactions;
+use Chatwoot_plugin\Database\Migrations\V014_Add_conversation_workflow_snooze;
+use Chatwoot_plugin\Database\Migrations\V015_Collaboration_productivity;
 use CodeIgniter\Database\BaseConnection;
 use Config\Database;
 use RuntimeException;
@@ -27,6 +33,12 @@ require_once dirname(__DIR__) . '/Database/Migrations/V006_Bot_versions_and_camp
 require_once dirname(__DIR__) . '/Database/Migrations/V007_Campaign_run_recipients.php';
 require_once dirname(__DIR__) . '/Database/Migrations/V008_Migrate_legacy_campaign_dispatch.php';
 require_once dirname(__DIR__) . '/Database/Migrations/V009_Retire_legacy_ai_reports_and_n8n.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V010_Add_message_delivery_timestamps.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V011_Create_chat_message_reactions.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V012_Create_chat_message_reaction_attempts.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V013_Harden_chat_message_reactions.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V014_Add_conversation_workflow_snooze.php';
+require_once dirname(__DIR__) . '/Database/Migrations/V015_Collaboration_productivity.php';
 
 /**
  * Small plugin-owned migration runner.
@@ -74,6 +86,12 @@ class Migration_runner
                 V007_Campaign_run_recipients::VERSION => V007_Campaign_run_recipients::class,
                 V008_Migrate_legacy_campaign_dispatch::VERSION => V008_Migrate_legacy_campaign_dispatch::class,
                 V009_Retire_legacy_ai_reports_and_n8n::VERSION => V009_Retire_legacy_ai_reports_and_n8n::class,
+                V010_Add_message_delivery_timestamps::VERSION => V010_Add_message_delivery_timestamps::class,
+                V011_Create_chat_message_reactions::VERSION => V011_Create_chat_message_reactions::class,
+                V012_Create_chat_message_reaction_attempts::VERSION => V012_Create_chat_message_reaction_attempts::class,
+                V013_Harden_chat_message_reactions::VERSION => V013_Harden_chat_message_reactions::class,
+                V014_Add_conversation_workflow_snooze::VERSION => V014_Add_conversation_workflow_snooze::class,
+                V015_Collaboration_productivity::VERSION => V015_Collaboration_productivity::class,
             ];
 
             ksort($migrations, SORT_NUMERIC);

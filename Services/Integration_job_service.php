@@ -47,6 +47,7 @@ class Integration_job_service
 
         $result = ['processed' => 0, 'completed' => 0, 'failed' => 0, 'scheduled' => 0, 'maintenance' => []];
         try {
+            $result['workflow'] = (new Conversation_workflow_service($this->db))->wakeDueSnoozes();
             $result['scheduled'] = $this->schedulePendingWork();
             $rows = $this->db->table('chat_integration_jobs')
                 ->where('deleted', 0)
@@ -83,6 +84,7 @@ class Integration_job_service
                     ]);
                     if ($final) {
                         $this->notifyPersistentFailure($job, $safeError);
+                        $this->markWebhookRetryExhausted($job, $safeError, $attempt);
                     }
                     $result['failed']++;
                 }
@@ -98,7 +100,7 @@ class Integration_job_service
     {
         $scheduled = 0;
         $pendingLogs = $this->db->table('chat_webhook_logs')
-            ->select('id,payload')
+            ->select('id,payload,response_payload')
             ->where('deleted', 0)
             ->where('success', 0)
             ->where('processed_at IS NULL', null, false)
@@ -107,6 +109,9 @@ class Integration_job_service
             ->get()
             ->getResultArray();
         foreach ($pendingLogs as $log) {
+            if ($this->isRetryExhausted($log['response_payload'] ?? null)) {
+                continue;
+            }
             $correlation = 'webhook-log-' . (int) $log['id'];
             if ($this->hasActiveJob($correlation)) {
                 continue;
@@ -237,6 +242,46 @@ class Integration_job_service
         } catch (Throwable $exception) {
             // The failed job remains the source of truth if notification fails.
         }
+    }
+
+    private function markWebhookRetryExhausted(array $job, string $error, int $attempt): void
+    {
+        if ((string) ($job['job_type'] ?? '') !== 'webhook_retry') return;
+        $correlation = trim((string) ($job['correlation_id'] ?? ''));
+        if (!preg_match('/^webhook-log-(\d+)$/', $correlation, $matches)) return;
+        $logId = (int) ($matches[1] ?? 0);
+        if ($logId < 1) return;
+        $row = $this->db->table('chat_webhook_logs')
+            ->select('response_payload')
+            ->where('id', $logId)
+            ->where('deleted', 0)
+            ->get(1)
+            ->getRowArray();
+        $response = $this->json((string) ($row['response_payload'] ?? ''));
+        $response['processed'] = false;
+        $response['pending'] = false;
+        $response['retryable'] = false;
+        $response['terminal'] = true;
+        $response['retry_exhausted'] = true;
+        $response['attempts'] = $attempt;
+        $response['last_error'] = $error;
+        $now = gmdate('Y-m-d H:i:s');
+        $this->db->table('chat_webhook_logs')
+            ->where('id', $logId)
+            ->where('deleted', 0)
+            ->update([
+                'response_payload' => json_encode($response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'error_message' => 'retry_exhausted',
+                'processed_at' => $now,
+                'updated_at' => $now,
+            ]);
+    }
+
+    private function isRetryExhausted($payload): bool
+    {
+        if (is_array($payload)) return !empty($payload['retry_exhausted']);
+        $decoded = $this->json((string) $payload);
+        return !empty($decoded['retry_exhausted']);
     }
 
     private function json(string $value): array

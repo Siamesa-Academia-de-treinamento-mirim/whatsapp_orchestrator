@@ -42,6 +42,8 @@ class Chat_conversations_model extends Crud_model
         'bot_paused_at',
         'bot_paused_by',
         'bot_handoff_reason',
+        'snoozed_until',
+        'snoozed_by',
     ];
 
     public function __construct()
@@ -185,6 +187,36 @@ class Chat_conversations_model extends Crud_model
             ]);
     }
 
+    public function mark_unread(int $id): bool
+    {
+        return $this->db->table($this->table)
+            ->where('id', $id)
+            ->where('deleted', 0)
+            ->where('unread_count <', 1)
+            ->update([
+                'unread_count' => 1,
+                'updated_at' => gmdate('Y-m-d H:i:s'),
+            ]);
+    }
+
+    /** @return array{open:int,pending:int,resolved:int,snoozed:int,unread:int} */
+    public function workflow_counts(array $filters = []): array
+    {
+        $base = $this->applyFilters($this->db->table($this->table), $filters);
+        $rows = (clone $base)
+            ->select('status, COUNT(id) AS total', false)
+            ->groupBy('status')
+            ->get()
+            ->getResultArray();
+        $counts = ['open' => 0, 'pending' => 0, 'resolved' => 0, 'snoozed' => 0, 'unread' => 0];
+        foreach ($rows as $row) {
+            $status = (string) ($row['status'] ?? '');
+            if (array_key_exists($status, $counts)) $counts[$status] = (int) $row['total'];
+        }
+        $counts['unread'] = (clone $base)->where('unread_count >', 0)->countAllResults();
+        return $counts;
+    }
+
     public function count_matching(array $filters = []): int
     {
         return $this->applyFilters($this->db->table($this->table), $filters)
@@ -194,6 +226,15 @@ class Chat_conversations_model extends Crud_model
     private function applyFilters(BaseBuilder $builder, array $filters): BaseBuilder
     {
         $builder->where('deleted', 0);
+
+        $conversationId = (int) ($filters['conversation_id'] ?? 0);
+        if ($conversationId > 0) {
+            $builder->where('id', $conversationId);
+        }
+        $excludeId = (int) ($filters['exclude_id'] ?? 0);
+        if ($excludeId > 0) {
+            $builder->where('id !=', $excludeId);
+        }
 
         $instanceId = (int) ($filters['instance_id'] ?? 0);
         if ($instanceId > 0) {
@@ -215,12 +256,72 @@ class Chat_conversations_model extends Crud_model
             $builder->where('status', $status);
         }
 
+        $contactId = (int) ($filters['contact_id'] ?? 0);
+        if ($contactId > 0) {
+            $builder->where('contact_id', $contactId);
+        }
+
+        $phone = trim((string) ($filters['phone_number_exact'] ?? ''));
+        if ($phone !== '') {
+            $builder->where('phone_number', $phone);
+        }
+
         if (array_key_exists('archived', $filters) && $filters['archived'] !== null) {
             $builder->where('archived', $filters['archived'] ? 1 : 0);
         }
 
         if (!empty($filters['unassigned'])) {
             $builder->where('assignee_id IS NULL', null, false);
+        }
+
+        if (array_key_exists('assignee_id', $filters) && $filters['assignee_id'] !== '' && $filters['assignee_id'] !== null) {
+            if ((string) $filters['assignee_id'] === 'unassigned' || (int) $filters['assignee_id'] === 0) {
+                $builder->where('assignee_id IS NULL', null, false);
+            } else {
+                $builder->where('assignee_id', (int) $filters['assignee_id']);
+            }
+        }
+
+        if (array_key_exists('team_id', $filters) && $filters['team_id'] !== '' && $filters['team_id'] !== null) {
+            if ((int) $filters['team_id'] === 0) $builder->where('team_id IS NULL', null, false);
+            else $builder->where('team_id', (int) $filters['team_id']);
+        }
+
+        if (!empty($filters['priority'])) {
+            $priority = (string) $filters['priority'];
+            if ($priority === 'medium') $builder->whereIn('priority', ['medium', 'normal']);
+            elseif ($priority === 'none') $builder->groupStart()->where('priority IS NULL', null, false)->orWhere('priority', '')->orWhere('priority', 'none')->groupEnd();
+            else $builder->where('priority', $priority);
+        }
+
+        if (array_key_exists('unread', $filters) && $filters['unread'] !== null && $filters['unread'] !== '') {
+            $builder->where($filters['unread'] ? 'unread_count > 0' : 'unread_count = 0', null, false);
+        }
+
+        $conversationType = trim((string) ($filters['conversation_type'] ?? ''));
+        if ($conversationType !== '') $builder->where('conversation_type', $conversationType);
+
+        $botStatus = trim((string) ($filters['bot_status'] ?? ''));
+        if ($botStatus !== '') {
+            if ($botStatus === 'running') $builder->where('bot_status', 'active');
+            elseif ($botStatus === 'paused') $builder->where('bot_status', 'paused');
+            elseif ($botStatus === 'handoff') $builder->where('bot_status', 'handoff');
+            else $builder->where('bot_status', $botStatus);
+        }
+
+        $from = trim((string) ($filters['last_activity_from'] ?? ''));
+        if ($from !== '') $builder->where('last_message_at >=', $from);
+        $to = trim((string) ($filters['last_activity_to'] ?? ''));
+        if ($to !== '') $builder->where('last_message_at <=', $to);
+
+        $tags = is_array($filters['tags'] ?? null) ? $filters['tags'] : [];
+        if ($tags) {
+            $link = $this->db->prefixTable('chat_conversation_tags');
+            $tagTable = $this->db->prefixTable('chat_tags');
+            $escaped = array_map(fn ($tag): string => $this->db->escape((string) $tag), $tags);
+            $in = implode(',', $escaped);
+            $conversationTable = $this->db->prefixTable('chat_conversations');
+            $builder->where("EXISTS (SELECT 1 FROM {$link} ctl INNER JOIN {$tagTable} ct ON ct.id=ctl.tag_id AND ct.deleted=0 WHERE ctl.conversation_id={$conversationTable}.id AND ctl.deleted=0 AND (ct.name IN ({$in}) OR ct.normalized_name IN ({$in})))", null, false);
         }
 
         $search = trim((string) ($filters['search'] ?? ''));

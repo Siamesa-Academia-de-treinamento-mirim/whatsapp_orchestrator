@@ -90,6 +90,9 @@ $test('Evolution endpoints, header, body, status mapping and message id', static
         if (str_contains($url, '/sendText/')) {
             return ['status_code' => 201, 'body' => json_encode(['key' => ['id' => 'message-real-id']])];
         }
+        if (str_contains($url, '/sendReaction/')) {
+            return ['status_code' => 201, 'body' => json_encode(['key' => ['id' => 'reaction-real-id']])];
+        }
 
         return ['status_code' => 200, 'body' => json_encode(['records' => []])];
     };
@@ -131,6 +134,21 @@ $test('Evolution endpoints, header, body, status mapping and message id', static
     $assertSame('message-real-id', $sent['message_id']);
     $assertSame('https://evolution.example.test/message/sendText/Loja%20Principal', $calls[3]['url']);
     $assertSame(['number' => '5511999999999', 'text' => 'Mensagem de teste'], $calls[3]['payload']);
+    $client->send_text_with_context('5511999999999', 'Resposta', null, [
+        'reply_to_external_message_id' => 'message-incoming-id',
+        'reply_to_remote_jid' => '5511999999999@s.whatsapp.net',
+        'reply_to_from_me' => false,
+    ]);
+    $assertSame('message-incoming-id', $calls[4]['payload']['quoted']['key']['id']);
+    $assertSame('5511999999999@s.whatsapp.net', $calls[4]['payload']['quoted']['key']['remoteJid']);
+    $assertSame(false, $calls[4]['payload']['quoted']['key']['fromMe']);
+    $reaction = $client->sendReaction('120363012345678901', 'message-incoming-id', '👍', null, ['remote_jid' => '120363012345678901@g.us', 'participant' => '5511987654321@s.whatsapp.net']);
+    $assertTrue($reaction['success']);
+    $assertSame('https://evolution.example.test/message/sendReaction/Loja%20Principal', $calls[5]['url']);
+    $assertSame('message-incoming-id', $calls[5]['payload']['reactionKey']['id']);
+    $assertSame('120363012345678901@g.us', $calls[5]['payload']['reactionKey']['remoteJid']);
+    $assertSame('5511987654321@s.whatsapp.net', $calls[5]['payload']['reactionKey']['participant']);
+    $assertSame('👍', $calls[5]['payload']['reactionMessage']);
 });
 
 $test('Settings fallback and configurable endpoint', static function () use ($assertTrue, $assertSame): void {
@@ -464,6 +482,18 @@ $test('Evolution group events preserve group and participant identities independ
     $assertSame('5511987654321', $normalized['sender_phone']);
     $assertSame('Maria Silva', $normalized['sender_name']);
     $assertTrue(str_starts_with($normalized['dedupe_key'], 'message:'));
+
+    $selfReaction = $normalizer->normalize([
+        'event' => 'messages.upsert',
+        'instance' => 'principal',
+        'data' => [
+            'key' => ['id' => 'GROUP-REACTION-SELF', 'remoteJid' => '120363012345678901@g.us', 'fromMe' => true, 'participant' => '5511987654321@s.whatsapp.net'],
+            'messageTimestamp' => 1784123456,
+            'message' => ['reactionMessage' => ['key' => ['remoteJid' => '120363012345678901@g.us', 'fromMe' => false, 'id' => 'GROUP-1', 'participant' => '5511987654321@s.whatsapp.net'], 'text' => '👍']],
+        ],
+    ]);
+    $assertSame('self', $selfReaction['structured_content']['reaction']['reactor_key']);
+    $assertSame('GROUP-1', $selfReaction['structured_content']['reaction']['message_id']);
 });
 
 $test('Meta Cloud client builds official payloads, validates signature and hides credentials', static function () use ($assertTrue, $assertSame, $assertNotContains): void {
@@ -503,10 +533,26 @@ $test('Meta Cloud client builds official payloads, validates signature and hides
     $assertTrue(str_contains($headers, 'Authorization: Bearer ' . $token));
     $assertNotContains($token, (string) json_encode($response));
 
+    $client->sendText('5511999990000', 'Resposta contextual', [
+        'reply_to_external_message_id' => 'wamid.IN-1',
+    ]);
+    $replyPayload = json_decode($calls[1]['body'], true);
+    $assertSame('wamid.IN-1', $replyPayload['context']['message_id']);
+
     $templates = $client->listTemplates(500);
     $assertTrue($templates['success']);
-    $assertTrue(str_contains($calls[1]['url'], '/987654321/message_templates?'));
-    $assertTrue(str_contains($calls[1]['url'], 'limit=250'));
+    $assertTrue(str_contains($calls[2]['url'], '/987654321/message_templates?'));
+    $assertTrue(str_contains($calls[2]['url'], 'limit=250'));
+
+    $reaction = $client->sendReaction('5511999990000', 'wamid.IN-1', '❤️');
+    $assertTrue($reaction['success']);
+    $reactionPayload = json_decode($calls[3]['body'], true);
+    $assertSame('reaction', $reactionPayload['type']);
+    $assertSame('wamid.IN-1', $reactionPayload['reaction']['message_id']);
+    $assertSame('❤️', $reactionPayload['reaction']['emoji']);
+    $client->sendReaction('5511999990000', 'wamid.IN-1', '');
+    $removePayload = json_decode($calls[4]['body'], true);
+    $assertSame('', $removePayload['reaction']['emoji']);
 });
 
 $test('Meta webhook expands incoming message and delivery receipt into neutral events', static function () use ($assertSame): void {
@@ -531,13 +577,19 @@ $test('Meta webhook expands incoming message and delivery receipt into neutral e
                         'recipient_id' => '5511987654321',
                         'timestamp' => '1785440001',
                         'status' => 'delivered',
+                    ], [
+                        'id' => 'wamid.OUT-FAIL',
+                        'recipient_id' => '5511987654321',
+                        'timestamp' => '1785440002',
+                        'status' => 'failed',
+                        'errors' => [['code' => 131009, 'message' => 'Reaction too old']],
                     ]],
                 ],
             ]],
         ]],
     ], 'meta-principal');
 
-    $assertSame(2, count($events));
+    $assertSame(3, count($events));
     $assertSame('messages.upsert', $events[0]['event']);
     $assertSame('meta-principal', $events[0]['instance_name']);
     $assertSame('Maria', $events[0]['contact_name']);
@@ -546,6 +598,26 @@ $test('Meta webhook expands incoming message and delivery receipt into neutral e
     $assertSame('messages.update', $events[1]['event']);
     $assertSame('delivered', $events[1]['message_status']);
     $assertSame('wamid.OUT-1|delivered', $events[1]['external_event_id']);
+    $assertSame('131009', $events[2]['delivery_error_code']);
+    $reactionEvents = $normalizer->expand([
+        'object' => 'whatsapp_business_account',
+        'entry' => [[
+            'changes' => [[
+                'field' => 'messages',
+                'value' => [
+                    'metadata' => ['phone_number_id' => '123456789'],
+                    'messages' => [[
+                        'from' => '5511987654321',
+                        'id' => 'wamid.REACTION-1',
+                        'type' => 'reaction',
+                        'reaction' => ['message_id' => 'wamid.TARGET-1', 'emoji' => '👍'],
+                    ]],
+                ],
+            ]],
+        ]],
+    ], 'meta-principal');
+    $assertSame(null, $reactionEvents[0]['timestamp']);
+    $assertSame(null, $reactionEvents[0]['structured_content']['reaction']['provider_timestamp']);
 });
 
 $test('Deterministic bot validates, matches accents and simulates completion without AI', static function () use ($assertSame, $assertTrue): void {
@@ -624,6 +696,10 @@ $test('Provider capability matrix prevents official group/template confusion', s
     $assertSame(true, $meta['supports_templates']);
     $assertSame(true, $meta['official']);
     $assertSame(false, $meta['freeform_outside_window']);
+    $assertSame(false, $meta['reaction']['groups']);
+    $assertSame(2592000, $meta['reaction']['max_target_age_seconds']);
+    $assertSame(true, $meta['reaction']['supports_remove']);
+    $assertSame(true, $evolution['reaction']['groups']);
 });
 
 echo "\n" . count($tests) . " passed, " . count($failures) . " failed.\n";

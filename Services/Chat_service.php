@@ -10,6 +10,7 @@ use Chatwoot_plugin\Models\Chat_instances_model;
 use Chatwoot_plugin\Models\Chat_messages_model;
 use Chatwoot_plugin\Models\Chat_settings_model;
 use Chatwoot_plugin\Models\Chat_webhook_logs_model;
+use Chatwoot_plugin\Providers\Provider_capabilities;
 use CodeIgniter\Database\BaseConnection;
 use InvalidArgumentException;
 use RuntimeException;
@@ -46,6 +47,12 @@ class Chat_service
     private Payload_sanitizer $sanitizer;
     private BaseConnection $db;
     private Provider_manager $providers;
+    private Message_projection_service $messageProjection;
+    private Message_reaction_service $messageReactions;
+    private Send_lock_service $sendLocks;
+    private Service_window_policy $serviceWindow;
+    private Template_parser_service $templateParser;
+    private Media_service $mediaService;
     /** @var callable|null */
     private $clientFactory;
 
@@ -59,7 +66,13 @@ class Chat_service
         ?Payload_sanitizer $sanitizer = null,
         ?BaseConnection $db = null,
         ?callable $clientFactory = null,
-        ?Provider_manager $providerManager = null
+        ?Provider_manager $providerManager = null,
+        ?Message_projection_service $messageProjection = null,
+        ?Send_lock_service $sendLocks = null,
+        ?Message_reaction_service $messageReactions = null,
+        ?Service_window_policy $serviceWindow = null,
+        ?Template_parser_service $templateParser = null,
+        ?Media_service $mediaService = null
     ) {
         $this->instances = $instances ?? new Chat_instances_model();
         $this->conversations = $conversations ?? new Chat_conversations_model();
@@ -71,6 +84,12 @@ class Chat_service
         $this->db = $db ?? db_connect('default');
         $this->clientFactory = $clientFactory;
         $this->providers = $providerManager ?? new Provider_manager($this->instances, $this->settings, $clientFactory);
+        $this->messageProjection = $messageProjection ?? new Message_projection_service();
+        $this->sendLocks = $sendLocks ?? new Send_lock_service($this->db);
+        $this->messageReactions = $messageReactions ?? new Message_reaction_service($this->db, null, $this->messages);
+        $this->serviceWindow = $serviceWindow ?? new Service_window_policy();
+        $this->templateParser = $templateParser ?? new Template_parser_service();
+        $this->mediaService = $mediaService ?? new Media_service();
     }
 
     /** @return array{data:array<int,array<string,mixed>>,meta:array<string,mixed>} */
@@ -104,6 +123,8 @@ class Chat_service
             $row['last_sync_at'] = $this->toIsoDate($row['last_sync_at'] ?? null);
             $row['created_at'] = $this->toIsoDate($row['created_at'] ?? null);
             $row['updated_at'] = $this->toIsoDate($row['updated_at'] ?? null);
+            $row['contract_version'] = 2;
+            $row['capabilities'] = Provider_capabilities::forProvider((string) ($row['provider_type'] ?? 'evolution'));
             unset($row['api_key'], $row['api_key_encrypted']);
             $mapped[] = $row;
         }
@@ -191,11 +212,17 @@ class Chat_service
     /** @return array{data:array<int,array<string,mixed>>,meta:array<string,mixed>} */
     public function list_conversations(array $filters = [], int $page = 1, int $perPage = 30): array
     {
+        $countFilters = $filters;
         if (($filters['status'] ?? '') === 'all') {
             unset($filters['status']);
+            unset($countFilters['status']);
         } elseif (($filters['status'] ?? '') === 'unassigned') {
             unset($filters['status']);
             $filters['unassigned'] = true;
+            unset($countFilters['status']);
+            $countFilters['unassigned'] = true;
+        } else {
+            unset($countFilters['status']);
         }
 
         $result = $this->conversations->paginate_conversations($filters, $page, $perPage);
@@ -220,22 +247,63 @@ class Chat_service
         $assigneeIds = array_values(array_unique(array_filter(array_map(static fn (array $row): int => (int) ($row['assignee_id'] ?? 0), $rows))));
         $assigneeMap = [];
         if ($assigneeIds) {
-            $userRows = $this->db->table('users')->select('id, first_name, last_name')->whereIn('id', $assigneeIds)->where('deleted', 0)->get()->getResultArray();
-            foreach ($userRows as $userRow) $assigneeMap[(int) $userRow['id']] = trim((string) $userRow['first_name'] . ' ' . (string) $userRow['last_name']);
+            $userRows = $this->db->table('users')->select('id, first_name, last_name, image, status, deleted')->whereIn('id', $assigneeIds)->get()->getResultArray();
+            foreach ($userRows as $userRow) {
+                $name = trim((string) $userRow['first_name'] . ' ' . (string) $userRow['last_name']);
+                if ((int) ($userRow['deleted'] ?? 0) === 1 || (string) ($userRow['status'] ?? '') !== 'active') $name .= ' (inativo)';
+                $assigneeMap[(int) $userRow['id']] = ['name' => $name, 'avatar' => (string) ($userRow['image'] ?? '')];
+            }
+        }
+        $teamIds = array_values(array_unique(array_filter(array_map(static fn (array $row): int => (int) ($row['team_id'] ?? 0), $rows))));
+        $teamMap = [];
+        if ($teamIds) {
+            try {
+                $teamRows = $this->db->table('team')->select('id,title')->whereIn('id', $teamIds)->where('deleted', 0)->get()->getResultArray();
+                foreach ($teamRows as $teamRow) $teamMap[(int) $teamRow['id']] = (string) $teamRow['title'];
+            } catch (Throwable $exception) {
+                $teamMap = [];
+            }
         }
 
         $mapped = [];
         foreach ($rows as $row) {
             $instance = $instanceMap[(int) ($row['instance_id'] ?? 0)] ?? null;
             $row['_tags'] = $tagMap[(int) ($row['id'] ?? 0)] ?? [];
-            $row['_assignee_name'] = $assigneeMap[(int) ($row['assignee_id'] ?? 0)] ?? '';
+            $row['_assignee'] = $assigneeMap[(int) ($row['assignee_id'] ?? 0)] ?? ['name' => '', 'avatar' => ''];
+            $row['_assignee_name'] = (string) ($row['_assignee']['name'] ?? '');
+            $row['_team_name'] = $teamMap[(int) ($row['team_id'] ?? 0)] ?? '';
             $mapped[] = $this->mapConversation($row, $instance);
         }
 
+        $meta = is_array($result['meta'] ?? null) ? $result['meta'] : [];
+        $meta['counts'] = $this->conversations->workflow_counts($countFilters);
+
         return [
             'data' => $mapped,
-            'meta' => is_array($result['meta'] ?? null) ? $result['meta'] : [],
+            'meta' => $meta,
         ];
+    }
+
+    public function get_conversation(int $id): ?array
+    {
+        if ($id < 1) return null;
+        $result = $this->list_conversations(['conversation_id' => $id, 'archived' => null], 1, 1);
+        return $result['data'][0] ?? null;
+    }
+
+    /** @return array{data:array<int,array<string,mixed>>,meta:array<string,mixed>} */
+    public function previous_conversations(int $id, int $page = 1, int $perPage = 20): array
+    {
+        $current = $this->conversations->get_by_id($id);
+        if (!$current) throw new InvalidArgumentException('Conversa nao encontrada.');
+        if (($current['conversation_type'] ?? 'individual') === 'group') {
+            return ['data' => [], 'meta' => ['page' => max(1, $page), 'per_page' => min(50, max(1, $perPage)), 'total' => 0, 'has_more' => false]];
+        }
+        $filters = ['archived' => null, 'exclude_id' => $id];
+        if (!empty($current['contact_id'])) $filters['contact_id'] = (int) $current['contact_id'];
+        else $filters['phone_number_exact'] = (string) ($current['phone_number'] ?? '');
+        $result = $this->list_conversations($filters, $page, min(50, max(1, $perPage)));
+        return $result;
     }
 
     /**
@@ -312,7 +380,8 @@ class Chat_service
         ?int $beforeId = null,
         ?int $afterId = null,
         bool $sync = false,
-        ?int $beforeTimestamp = null
+        ?int $beforeTimestamp = null,
+        ?int $reactionAfter = null
     ): array {
         $conversation = $this->conversations->get_by_id($conversationId);
         if (!$conversation) {
@@ -348,12 +417,38 @@ class Chat_service
                 ) > 0;
         }
 
+        // On a reset, take the cursor snapshot before reading the aggregate.
+        // Any mutation that lands during aggregate loading then has an id
+        // greater than this baseline and is visible on the next poll.
+        $reactionCursorResult = ($reactionAfter === null || $reactionAfter < 1)
+            ? $this->messageReactions->changesAfter($conversationId, null)
+            : null;
+        $reactionMap = $this->messageReactions->aggregates(array_map(static fn (array $row): int => (int) ($row['id'] ?? 0), $rows));
+        $mentionMap = $this->noteMentionsForMessages($rows);
+        $reactionCursorResult ??= $this->messageReactions->changesAfter($conversationId, $reactionAfter);
+        $reactionUpdates = [];
+        foreach ($reactionCursorResult['target_ids'] as $targetId) {
+            $target = $this->messages->get_by_id($targetId);
+            if (!$target || (int) ($target['conversation_id'] ?? 0) !== $conversationId) continue;
+            $target['reactions'] = $this->messageReactions->aggregates([$targetId])[$targetId] ?? [];
+            $reactionUpdates[] = $this->mapMessage($target);
+        }
+        $reactionCursor = (int) ($reactionCursorResult['cursor'] ?? 0);
+
         return [
-            'data' => array_map(fn (array $row): array => $this->mapMessage($row), $rows),
+            'data' => array_map(function (array $row) use ($reactionMap, $mentionMap): array {
+                $row['reactions'] = $reactionMap[(int) ($row['id'] ?? 0)] ?? [];
+                if ((string) ($row['message_type'] ?? '') === 'internal_note' || !empty($row['is_internal_note'])) {
+                    $row['_mentions'] = $mentionMap[(int) ($row['id'] ?? 0)] ?? [];
+                }
+                return $this->mapMessage($row);
+            }, $rows),
             'meta' => [
                 'has_more_before' => $hasMoreBefore,
                 'synced' => $synced,
                 'sync_error' => $syncError,
+                'reaction_updates' => $reactionUpdates,
+                'reaction_cursor' => $reactionCursor,
             ],
         ];
     }
@@ -449,21 +544,18 @@ class Chat_service
     }
 
     /** @return array<string,mixed> */
-    public function send_text(int $conversationId, string $text, string $clientMessageId, int $actorId = 0): array
+    public function send_text(int $conversationId, string $text, string $clientMessageId, int $actorId = 0, ?int $replyToMessageId = null): array
     {
+        $timingStartedAt = microtime(true);
+        $providerStartedAt = null;
+        $providerFinishedAt = null;
+        $timingProvider = 'unknown';
         $conversation = $this->conversations->get_by_id($conversationId);
         if (!$conversation) {
             throw new InvalidArgumentException('Conversa nao encontrada.');
         }
 
         $instance = $this->instances->get_by_id((int) $conversation['instance_id']);
-        if (!$instance || empty($instance['active'])) {
-            throw new RuntimeException('A instancia desta conversa esta inativa.');
-        }
-        if ((string) ($instance['connection_status'] ?? '') !== 'connected') {
-            throw new RuntimeException('A instancia esta desconectada; o envio foi bloqueado.');
-        }
-
         $text = trim($text);
         $clientMessageId = trim($clientMessageId);
         if ($text === '' || $clientMessageId === '') {
@@ -480,30 +572,58 @@ class Chat_service
 
         try {
             $existing = $this->messages->find_by_client_message_id($conversationId, $clientMessageId);
-            if ($existing && in_array((string) ($existing['status'] ?? ''), ['sent', 'delivered', 'read'], true)) {
-                return $this->mapMessage($existing);
+            if ($existing) {
+                $existingText = array_key_exists('text_content', $existing) ? (string) $existing['text_content'] : null;
+                if ($existingText === null || $existingText !== $text) {
+                    throw new Message_send_exception(
+                        'O client_message_id ja representa outro texto. Use um novo identificador para uma nova mensagem.',
+                        'rejected',
+                        409,
+                        null,
+                        'IDEMPOTENCY_PAYLOAD_MISMATCH'
+                    );
+                }
+                $existingState = $this->textIdempotencyState($existing);
+                if ($existingState === 'idempotent_success') {
+                    return $this->mapMessage($existing);
+                }
+                if ($existingState !== 'retryable_failure') {
+                    throw new Message_send_exception(
+                        (string) ($existing['delivery_error'] ?? 'O resultado do envio de texto e ambiguo; o mesmo identificador nao sera reenviado automaticamente.'),
+                        $existingState,
+                        409
+                    );
+                }
+            }
+
+            if (!$instance || empty($instance['active'])) {
+                throw new RuntimeException('A instancia desta conversa esta inativa.');
+            }
+            if ((string) ($instance['connection_status'] ?? '') !== 'connected') {
+                throw new RuntimeException('A instancia esta desconectada; o envio foi bloqueado.');
             }
 
             $provider = $this->providers->forInstance($instance);
             $capabilities = $provider->capabilities();
             $providerName = $provider->name();
+            $timingProvider = $providerName;
+            $storedReplyId = $existing ? $this->replyTargetLocalId($existing) : null;
+            if ($existing && $this->hasReplyContext($existing) && $storedReplyId === null) {
+                throw new InvalidArgumentException('A mensagem original da resposta contextual nao esta mais disponivel.');
+            }
+            if ($existing && $storedReplyId !== null && $replyToMessageId !== null && $storedReplyId !== $replyToMessageId) {
+                throw new InvalidArgumentException('O retry precisa reutilizar a mensagem original da resposta contextual.');
+            }
+            $effectiveReplyId = $storedReplyId ?? $replyToMessageId;
+            $replyTarget = $this->resolveReplyTarget($conversationId, $effectiveReplyId, $capabilities);
+            $replyExternalId = $replyTarget['external_message_id'] ?? null;
             $remoteJid = trim((string) $conversation['remote_jid']);
             $isGroup = $this->isGroupJid($remoteJid) || (string) ($conversation['conversation_type'] ?? '') === 'group';
             if ($isGroup && empty($capabilities['supports_groups'])) {
                 throw new RuntimeException('O provedor oficial nao oferece envio para grupos. Use uma instancia Evolution para esta conversa.');
             }
 
-            if ($providerName === 'meta_cloud') {
-                if ($isGroup) {
-                    throw new RuntimeException('A API oficial nao oferece conversas em grupo.');
-                }
-                $windowExpires = !empty($conversation['service_window_expires_at'])
-                    ? strtotime((string) $conversation['service_window_expires_at'])
-                    : false;
-                if (!$windowExpires || $windowExpires <= time()) {
-                    throw new RuntimeException('A janela de atendimento de 24 horas esta fechada. Envie um template oficial aprovado e aguarde a resposta do contato.');
-                }
-            }
+            $this->serviceWindow->assertFreeformAllowed($conversation, $capabilities, 'mensagem');
 
             $number = (string) ($conversation['phone_number'] ?: $remoteJid);
             if ($this->isLidJid($remoteJid)) {
@@ -526,7 +646,11 @@ class Chat_service
                 'provider_name' => $providerName,
                 'is_group_message' => $isGroup ? 1 : 0,
                 'sender_user_id' => $actorId ?: null,
+                'raw_payload' => $this->textSendRawPayload($providerName, $effectiveReplyId, $replyExternalId),
             ];
+            if ($replyExternalId !== null) {
+                $messagePayload['reply_to_external_message_id'] = $replyExternalId;
+            }
             if ($existing) {
                 $messageId = (int) $existing['id'];
                 $this->messages->update_message($messageId, $messagePayload);
@@ -538,26 +662,31 @@ class Chat_service
                     'message_type' => 'text',
                     'dedupe_key' => $dedupeKey,
                     'client_message_id' => $clientMessageId,
-                    'raw_payload' => ['source' => 'rise_ui', 'provider' => $providerName],
+                    'raw_payload' => $this->textSendRawPayload($providerName, $effectiveReplyId, $replyExternalId),
                 ]));
             }
 
-            $response = $provider->sendText($recipient, $text, [
-                'conversation_id' => $conversationId,
-                'client_message_id' => $clientMessageId,
-            ]);
+            try {
+                $providerStartedAt = microtime(true);
+                $response = $provider->sendText($recipient, $text, [
+                    'conversation_id' => $conversationId,
+                    'client_message_id' => $clientMessageId,
+                    'reply_to_external_message_id' => $replyExternalId,
+                    'reply_to_remote_jid' => $replyTarget['remote_jid'] ?? null,
+                    'reply_to_from_me' => !empty($replyTarget['from_me']),
+                ]);
+                $providerFinishedAt = microtime(true);
+            } catch (Throwable $exception) {
+                $providerFinishedAt = microtime(true);
+                $error = mb_substr($exception->getMessage() ?: 'Falha ao comunicar com o provedor.', 0, 1000);
+                $this->markTextFailed($messageId, $instance, $providerName, $error, $actorId, 'ambiguous_failure', 0);
+                throw new Message_send_exception($error, 'ambiguous_failure', 409, $exception, 'PROVIDER_TRANSPORT_AMBIGUOUS', ['provider_status' => 0]);
+            }
             if (empty($response['success'])) {
                 $error = mb_substr((string) ($response['error'] ?? 'O provedor nao confirmou o envio.'), 0, 1000);
-                $this->messages->update_message($messageId, [
-                    'status' => 'failed',
-                    'delivery_error' => $error,
-                    'failed_at' => gmdate('Y-m-d H:i:s'),
-                ]);
-                try {
-                    (new Notification_service())->create('message_failed', 'Falha ao enviar mensagem', $error, 'conversation', $conversationId, $actorId ?: null, 'danger', 'send-failed|' . $conversationId . '|' . $clientMessageId);
-                } catch (Throwable $exception) { /* Provider failure remains primary. */ }
-                (new Audit_service())->record($actorId ?: null, 'message.send_failed', 'message', $messageId, (int) $instance['id'], [], ['error' => $error, 'provider' => $providerName]);
-                throw new RuntimeException($error);
+                $state = $this->providerFailureState($response);
+                $this->markTextFailed($messageId, $instance, $providerName, $error, $actorId, $state, (int) ($response['status_code'] ?? 0));
+                throw new Message_send_exception($error, $state, $state === 'ambiguous_failure' ? 409 : 422, null, 'PROVIDER_DELIVERY_FAILED', ['provider_status' => (int) ($response['status_code'] ?? 0), 'provider_code' => $response['error_code'] ?? null]);
             }
 
             $externalId = trim((string) ($response['message_id'] ?? ''));
@@ -612,11 +741,255 @@ class Chat_service
             return $this->mapMessage($saved);
         } finally {
             $this->releaseNamedLock($sendLock);
+            $finishedAt = microtime(true);
+            log_message('debug', 'Chatwoot_plugin message timing provider={provider} pre_provider_ms={pre_provider_ms} provider_ms={provider_ms} post_provider_ms={post_provider_ms} total_ms={total_ms}', [
+                'provider' => $timingProvider,
+                'pre_provider_ms' => $providerStartedAt === null ? null : (int) round(($providerStartedAt - $timingStartedAt) * 1000),
+                'provider_ms' => ($providerStartedAt === null || $providerFinishedAt === null) ? null : (int) round(($providerFinishedAt - $providerStartedAt) * 1000),
+                'post_provider_ms' => $providerFinishedAt === null ? null : (int) round(($finishedAt - $providerFinishedAt) * 1000),
+                'total_ms' => (int) round(($finishedAt - $timingStartedAt) * 1000),
+            ]);
         }
     }
 
-    /** Sends an approved official template. This is the only allowed outbound
-     * entry point when the Meta customer-service window is closed. */
+    /** @return array<string,mixed> */
+    public function send_reaction(int $conversationId, int $messageId, string $emoji, string $clientMessageId, int $actorId = 0, bool $remove = false): array
+    {
+        $conversation = $this->conversations->get_by_id($conversationId);
+        if (!$conversation) throw new InvalidArgumentException('Conversa nao encontrada.');
+        $target = $this->messages->get_by_id($messageId);
+        if (!$target || (int) ($target['conversation_id'] ?? 0) !== $conversationId) throw new InvalidArgumentException('A mensagem alvo nao pertence a conversa.');
+        if (in_array(strtolower(trim((string) ($target['message_type'] ?? ''))), ['reaction', 'activity'], true) || !empty($target['is_internal_note']) || (string) ($target['direction'] ?? '') === 'internal' || trim((string) ($target['external_message_id'] ?? '')) === '') throw new InvalidArgumentException('A mensagem escolhida nao pode receber reacao.');
+        $request = $this->messageReactions->normalizeRequest($emoji, $remove);
+        $emoji = $request['emoji'];
+        $requestedActive = $request['active'];
+        $clientMessageId = trim($clientMessageId);
+        if ($clientMessageId === '' || strlen($clientMessageId) > 191 || !preg_match('/^[A-Za-z0-9._:-]+$/', $clientMessageId)) throw new InvalidArgumentException('Identificador idempotente da reacao invalido.');
+        $instanceId = (int) ($conversation['instance_id'] ?? 0);
+        // Idempotency is checked before connection, capability and age gates.
+        // A confirmed replay must remain safe even after volatile state changes.
+        $existing = $this->messageReactions->findByClient($instanceId, $clientMessageId);
+        if ($existing) {
+            $samePayload = (int) ($existing['message_id'] ?? 0) === $messageId
+                && (int) ($existing['requested_active'] ?? 0) === ($requestedActive ? 1 : 0)
+                && (string) ($existing['requested_emoji'] ?? '') === $emoji;
+            if (!$samePayload) throw new Message_send_exception('O client_message_id ja representa outra reacao.', 'rejected', 409, null, 'IDEMPOTENCY_PAYLOAD_MISMATCH');
+            $existingState = (string) ($existing['send_state'] ?? '');
+            if ($existingState === 'sent') {
+                $target['reactions'] = $this->messageReactions->aggregates([$messageId])[$messageId] ?? [];
+                return $this->mapMessage($target);
+            }
+            if ($existingState !== 'retryable_failure') {
+                throw new Message_send_exception('O resultado da reacao e ambiguo; o mesmo identificador nao sera reenviado automaticamente.', $existingState ?: 'ambiguous_failure', 409, null, $existingState === 'rejected' ? 'REACTION_REJECTED' : 'REACTION_IDEMPOTENCY_LOCKED');
+            }
+        }
+
+        $instance = $this->instances->get_by_id($instanceId);
+        if (!$instance || empty($instance['active']) || (string) ($instance['connection_status'] ?? '') !== 'connected') throw new RuntimeException('A instancia desta conversa esta inativa ou desconectada.');
+        $provider = $this->providers->forInstance($instance);
+        $capabilities = $provider->capabilities();
+        $policy = is_array($capabilities['reaction'] ?? null) ? $capabilities['reaction'] : [];
+        if (empty($capabilities['actions']['react']) || empty($policy['enabled'])) throw new RuntimeException('Reacoes nao suportadas por este canal.');
+        $isGroup = $this->isGroupJid((string) ($conversation['remote_jid'] ?? '')) || (string) ($conversation['conversation_type'] ?? '') === 'group';
+        if ($isGroup && empty($policy['groups'])) throw new InvalidArgumentException('Este canal nao permite reacoes em grupos.');
+        if (!$requestedActive && empty($policy['supports_remove'])) throw new InvalidArgumentException('Este canal nao permite remover reacoes.');
+        $maxAge = (int) ($policy['max_target_age_seconds'] ?? 0);
+        $targetTimestamp = (int) ($target['message_timestamp'] ?? 0);
+        if ($maxAge > 0 && ($targetTimestamp < 1 || (time() - $targetTimestamp) > $maxAge)) {
+            throw new InvalidArgumentException('A mensagem alvo esta fora da janela de reacao permitida.');
+        }
+
+        $lock = 'chat_reaction_' . substr(hash('sha256', $conversationId . '|' . $messageId . '|' . $clientMessageId), 0, 40);
+        if (!$this->acquireNamedLock($lock, 0)) throw new RuntimeException('Uma reacao com este identificador ja esta em andamento.');
+        try {
+            // The client id lock protects the fast idempotency/retry lookup.
+            // The identity lock must also cover the provider call itself so
+            // two different client ids cannot race the same self reaction.
+            if (!$this->sendLocks->acquireReaction((int) $instance['id'], (int) $target['id'], 'self', 2)) {
+                throw new RuntimeException('A reacao desta identidade ja esta sendo atualizada.');
+            }
+            try {
+            $existing = $this->messageReactions->findByClient($instanceId, $clientMessageId);
+            if ($existing) {
+                $samePayload = (int) ($existing['message_id'] ?? 0) === $messageId
+                    && (int) ($existing['requested_active'] ?? 0) === ($requestedActive ? 1 : 0)
+                    && (string) ($existing['requested_emoji'] ?? '') === $emoji;
+                if (!$samePayload) throw new Message_send_exception('O client_message_id ja representa outra reacao.', 'rejected', 409, null, 'IDEMPOTENCY_PAYLOAD_MISMATCH');
+                if ((string) ($existing['send_state'] ?? '') === 'sent') {
+                    $target['reactions'] = $this->messageReactions->aggregates([$messageId])[$messageId] ?? [];
+                    return $this->mapMessage($target);
+                }
+                if ((string) ($existing['send_state'] ?? '') !== 'retryable_failure') {
+                    throw new Message_send_exception('O resultado do envio da reacao nao permite reenvio automatico.', (string) ($existing['send_state'] ?? 'ambiguous_failure'), 409, null, 'REACTION_IDEMPOTENCY_LOCKED');
+                }
+                $this->messageReactions->updateAttempt((int) $existing['id'], 'awaiting_provider');
+            }
+            if ($existing && (string) ($existing['send_state'] ?? '') === 'retryable_failure') {
+                $attemptId = (int) $existing['id'];
+            } else {
+                $attemptId = $this->messageReactions->createAttempt((int) $target['id'], (int) $instance['id'], $provider->name(), $clientMessageId, $emoji, $requestedActive, 'awaiting_provider', $actorId);
+            }
+            $remoteJid = trim((string) ($conversation['remote_jid'] ?? ''));
+            $recipient = $this->isGroupJid($remoteJid) ? $remoteJid : (string) ($conversation['phone_number'] ?? $remoteJid);
+            try {
+                $response = $provider->sendReaction($recipient, (string) $target['external_message_id'], $emoji, [
+                    'conversation_id' => $conversationId,
+                    'target_remote_jid' => $remoteJid,
+                    'target_from_me' => strtolower((string) ($target['direction'] ?? '')) === 'outgoing',
+                    'target_participant_jid' => (string) ($target['sender_jid'] ?? ''),
+                    'target_sender_jid' => (string) ($target['sender_jid'] ?? ''),
+                    'client_message_id' => $clientMessageId,
+                    'remove' => !$requestedActive,
+                ]);
+            } catch (Throwable $exception) {
+                $this->messageReactions->updateAttempt($attemptId, 'ambiguous_failure');
+                throw new Message_send_exception('Falha ao comunicar a reacao ao provedor.', 'ambiguous_failure', 409, $exception, 'REACTION_PROVIDER_UNCONFIRMED');
+            }
+            if (empty($response['success'])) {
+                $state = $this->reactionFailureState($response);
+                $this->messageReactions->updateAttempt($attemptId, $state);
+                throw new Message_send_exception((string) ($response['error'] ?? 'O provedor nao confirmou a reacao.'), $state, $state === 'rejected' ? 422 : 409, null, $state === 'rejected' ? 'REACTION_PROVIDER_REJECTED' : 'REACTION_PROVIDER_UNCONFIRMED');
+            }
+            $providerEventId = (string) ($response['message_id'] ?? '');
+            $this->messageReactions->updateAttempt($attemptId, 'sent', $providerEventId);
+            $this->messageReactions->updateAttemptProviderStatus($attemptId, 'sent', null, null, null, 'sent', $providerEventId);
+            // The identity lock is already held from before the provider call;
+            // confirmation must not recursively acquire the same named lock.
+            $this->messageReactions->confirmAttemptState($attemptId, $providerEventId, true);
+            $target['reactions'] = $this->messageReactions->aggregates([$messageId])[$messageId] ?? [];
+            return $this->mapMessage($target);
+            } finally {
+                $this->sendLocks->releaseReaction((int) $instance['id'], (int) $target['id'], 'self');
+            }
+        } finally {
+            $this->releaseNamedLock($lock);
+        }
+    }
+
+    /** Sends a locally selected, server-validated official template. */
+    public function send_template_by_id(int $conversationId, int $templateId, array $values, string $clientMessageId, int $actorId = 0): array
+    {
+        $conversation = $this->conversations->get_by_id($conversationId);
+        if (!$conversation) throw new InvalidArgumentException('Conversa nao encontrada.');
+        $instance = $this->instances->get_by_id((int) ($conversation['instance_id'] ?? 0));
+        if (!$instance) throw new RuntimeException('Instancia inexistente.');
+        $clientMessageId = trim($clientMessageId);
+        if ($templateId < 1 || $clientMessageId === '') throw new InvalidArgumentException('Template e identificador idempotente sao obrigatorios.');
+        $requestValues = $this->normalizeTemplateValues($values);
+        $requestHash = hash('sha256', json_encode([
+            'template_id' => $templateId,
+            'values' => $requestValues,
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        if (!$this->sendLocks->acquireFor($conversationId, $clientMessageId, 0)) throw new RuntimeException('Um envio com este identificador ja esta em andamento.', 409);
+        try {
+            // Idempotency is intentionally resolved before looking at the
+            // current template definition, approval state or provider gates.
+            // A successful logical attempt must not call Meta again merely
+            // because the cached definition was later paused or replaced.
+            $existing = $this->messages->find_by_client_message_id($conversationId, $clientMessageId);
+            $existingRaw = $existing ? (json_decode((string) ($existing['raw_payload'] ?? ''), true) ?: []) : [];
+            $existingTemplate = is_array($existingRaw['structured_content']['template'] ?? null)
+                ? $existingRaw['structured_content']['template'] : [];
+            $existingRequestHash = trim((string) ($existingTemplate['request_hash'] ?? ''));
+            if ($existing) {
+                if ($existingRequestHash === '' || !hash_equals($existingRequestHash, $requestHash)) {
+                    throw new Message_send_exception('O client_message_id ja representa outro template ou parametros.', 'rejected', 409, null, 'IDEMPOTENCY_PAYLOAD_MISMATCH');
+                }
+                if (in_array((string) ($existing['status'] ?? ''), ['sent', 'delivered', 'read'], true)) {
+                    return $this->mapMessage($existing);
+                }
+                $existingState = strtolower((string) ($existingRaw['send']['idempotency_state'] ?? ''));
+                if ($existingState === 'rejected') {
+                    $providerStatus = (int) ($existingRaw['send']['provider_status_code'] ?? 422);
+                    $providerCode = trim((string) ($existingRaw['send']['provider_error_code'] ?? '')) ?: null;
+                    $exceptionStatus = $providerStatus >= 400 && $providerStatus <= 599 ? $providerStatus : 422;
+                    throw new Message_send_exception(
+                        (string) ($existing['delivery_error'] ?? 'O envio do template foi rejeitado pelo provedor.'),
+                        'rejected',
+                        $exceptionStatus,
+                        null,
+                        'TEMPLATE_PROVIDER_REJECTED',
+                        ['original_send_state' => 'rejected', 'provider_status' => $providerStatus, 'provider_code' => $providerCode]
+                    );
+                }
+                if ($existingState !== 'retryable_failure') {
+                    throw new Message_send_exception('O resultado do template e ambiguo; verifique o provedor antes de reenviar.', 'ambiguous_failure', 409, null, 'TEMPLATE_PROVIDER_UNCONFIRMED');
+                }
+            }
+            if (empty($instance['active'])) throw new RuntimeException('Instancia inativa.');
+            $row = $this->db->table('chat_campaign_templates')->where('id', $templateId)->where('instance_id', (int) $instance['id'])->where('deleted', 0)->get(1)->getRowArray();
+            if (!$row) throw new Message_send_exception('Template nao encontrado nesta instancia.', 'rejected', 422, null, 'TEMPLATE_NOT_SENDABLE');
+            $row['components'] = json_decode((string) ($row['components_json'] ?? '[]'), true) ?: [];
+            $template = $this->templateParser->parse($row);
+            if (empty($template['sendable'])) {
+                $code = (string) ($template['unsupported_reason'] ?: 'TEMPLATE_NOT_SENDABLE');
+                if (!in_array($code, ['TEMPLATE_NOT_APPROVED', 'TEMPLATE_NOT_SENDABLE'], true)) $code = 'TEMPLATE_NOT_SENDABLE';
+                throw new Message_send_exception('Este template nao esta aprovado ou nao e enviavel.', 'rejected', 422, null, $code);
+            }
+            $resolved = $this->templateParser->resolve($template, $values);
+            if ($existing) {
+                $oldDefinitionHash = trim((string) ($existingTemplate['definition_hash'] ?? ''));
+                $definitionHash = $this->templateDefinitionHash($template);
+                if ($oldDefinitionHash === '' || !hash_equals($oldDefinitionHash, $definitionHash)) {
+                    throw new Message_send_exception('A definicao original do template mudou; o retry automatico foi bloqueado.', 'rejected', 409, null, 'TEMPLATE_DEFINITION_CHANGED');
+                }
+            }
+            $provider = $this->providers->forInstance($instance);
+            $capabilities = $provider->getCapabilities();
+            if (empty($capabilities['actions']['send_template'])) throw new Message_send_exception('Este canal nao suporta templates oficiais.', 'rejected', 422, null, 'TEMPLATE_NOT_SENDABLE');
+            if (str_ends_with(strtolower((string) ($conversation['remote_jid'] ?? '')), '@g.us') && empty($capabilities['conversation']['groups'])) {
+                throw new Message_send_exception('Templates oficiais nao sao enviados para grupos neste provedor.', 'rejected', 422, null, 'TEMPLATE_GROUP_NOT_SUPPORTED');
+            }
+            $historyComponents = $this->sanitizeTemplateHistoryComponents($resolved['components']);
+            $transportComponents = $this->resolveTemplateMediaComponents($resolved['components'], $conversationId, (int) $instance['id'], $capabilities);
+            $phone = (string) preg_replace('/\D+/', '', (string) ($conversation['phone_number'] ?: $conversation['remote_jid']));
+            if ($phone === '') throw new InvalidArgumentException('Contato sem numero oficial resolvido.');
+            $now = time();
+            $preview = mb_substr(trim((string) ($resolved['resolved']['body'] ?? $resolved['preview'] ?? '')), 0, 255);
+            if ($preview === '') $preview = '[Template] ' . $template['name'];
+            $definitionHash = $this->templateDefinitionHash($template);
+            $templateContent = ['id' => $template['id'], 'provider_template_id' => $template['provider_template_id'], 'name' => $template['name'], 'language' => $template['language'], 'category' => $template['category'], 'header' => $template['header'], 'body' => $template['body'], 'footer' => $template['footer'], 'header_definition' => $template['header'], 'body_definition' => $template['body'], 'footer_definition' => $template['footer'], 'resolved_header' => $resolved['resolved']['header'] ?? null, 'resolved_body' => $resolved['resolved']['body'] ?? $resolved['preview'], 'resolved_footer' => $resolved['resolved']['footer'] ?? null, 'buttons' => $template['buttons'], 'resolved_parameters' => $historyComponents, 'resolved_content' => $this->sanitizeTemplateResolvedContent($resolved['resolved']), 'preview' => $resolved['preview'], 'media_reference' => $resolved['resolved']['media_reference'] ?? null, 'request_hash' => $requestHash, 'request_values' => $requestValues, 'definition_hash' => $definitionHash, 'idempotency_hash' => $requestHash];
+            $raw = ['source' => 'official_template', 'send' => ['idempotency_state' => 'awaiting_provider'], 'structured_content' => ['template' => $templateContent]];
+            if ($existingRaw !== []) {
+                $history = is_array($existingRaw['send']['history'] ?? null) ? $existingRaw['send']['history'] : [];
+                $history[] = ['state' => $existingRaw['send']['idempotency_state'] ?? 'failed', 'error' => $existing['delivery_error'] ?? null, 'at' => gmdate('c')];
+                $raw['send']['history'] = array_slice($history, -10);
+            }
+            $messagePayload = ['external_message_id' => null, 'remote_jid' => (string) $conversation['remote_jid'], 'direction' => 'outgoing', 'message_type' => 'template', 'text_content' => $preview, 'status' => 'sending', 'sent_at' => gmdate('Y-m-d H:i:s', $now), 'message_timestamp' => $now, 'dedupe_key' => hash('sha256', 'template|' . $conversationId . '|' . $clientMessageId), 'client_message_id' => $clientMessageId, 'provider_name' => $provider->name(), 'raw_payload' => $this->sanitizer->sanitize($raw), 'sender_user_id' => $actorId ?: null];
+            $messageId = $existing ? (int) $existing['id'] : $this->messages->upsert_message($conversationId, (int) $instance['id'], $messagePayload);
+            if ($existing) $this->messages->update_message($messageId, $messagePayload);
+            try {
+                $response = $provider->sendTemplate($phone, $template['name'], $template['language'], $transportComponents, ['conversation_id' => $conversationId]);
+            } catch (Throwable $exception) {
+                $error = mb_substr($exception->getMessage() ?: 'Falha ao comunicar com o provedor.', 0, 1000);
+                $raw['send']['idempotency_state'] = 'ambiguous_failure';
+                $raw['send']['provider_status_code'] = 0;
+                $this->messages->update_message($messageId, ['status' => 'failed', 'delivery_error' => $error, 'failed_at' => gmdate('Y-m-d H:i:s'), 'raw_payload' => $this->sanitizer->sanitize($raw)]);
+                throw new Message_send_exception($error, 'ambiguous_failure', 409, $exception, 'TEMPLATE_PROVIDER_UNCONFIRMED', ['provider_status' => 0]);
+            }
+            if (empty($response['success'])) {
+                $error = mb_substr((string) ($response['error'] ?? 'O provedor nao confirmou o template.'), 0, 1000);
+                $state = $this->providerFailureState($response);
+                $raw['send']['idempotency_state'] = $state;
+                $raw['send']['provider_status_code'] = (int) ($response['status_code'] ?? 0);
+                $raw['send']['provider_error_code'] = trim((string) ($response['error_code'] ?? $response['code'] ?? '')) ?: null;
+                $this->messages->update_message($messageId, ['status' => 'failed', 'delivery_error' => $error, 'failed_at' => gmdate('Y-m-d H:i:s'), 'raw_payload' => $this->sanitizer->sanitize($raw)]);
+                throw new Message_send_exception($error, $state, $state === 'ambiguous_failure' ? 409 : 422, null, 'TEMPLATE_PROVIDER_REJECTED', ['provider_status' => (int) ($response['status_code'] ?? 0), 'provider_code' => $raw['send']['provider_error_code']]);
+            }
+            $externalId = trim((string) ($response['message_id'] ?? ''));
+            $raw['send']['idempotency_state'] = 'idempotent_success';
+            $raw['response'] = $response['data'] ?? [];
+            $this->messages->update_message($messageId, ['external_message_id' => $externalId !== '' ? $externalId : null, 'provider_payload_id' => $externalId !== '' ? $externalId : null, 'status' => 'sent', 'sent_at' => gmdate('Y-m-d H:i:s', $now), 'delivery_error' => null, 'failed_at' => null, 'raw_payload' => $this->sanitizer->sanitize($raw)]);
+            $this->upsertConversationPreservingActivity((int) $instance['id'], (string) $conversation['remote_jid'], ['last_message_preview' => $preview, 'last_message_at' => gmdate('Y-m-d H:i:s', $now), 'last_human_message_at' => $actorId > 0 ? gmdate('Y-m-d H:i:s', $now) : null], $now);
+            $saved = $this->messages->get_by_id($messageId);
+            if (!$saved) throw new RuntimeException('Template enviado nao pode ser relido.');
+            return $this->mapMessage($saved);
+        } finally {
+            $this->sendLocks->releaseFor($conversationId, $clientMessageId);
+        }
+    }
+
+    /** Sends an approved official template. This is the compatibility entry point for campaigns. */
     public function send_template(
         int $conversationId,
         string $templateName,
@@ -657,7 +1030,23 @@ class Chat_service
             'client_message_id' => $clientMessageId,
             'provider_name' => $provider->name(),
             'provider_payload_id' => $externalId !== '' ? $externalId : null,
-            'raw_payload' => $this->sanitizer->sanitize(['source' => 'official_template', 'template' => $templateName, 'language' => $languageCode, 'response' => $response['data'] ?? []]),
+            'raw_payload' => $this->sanitizer->sanitize([
+                'source' => 'official_template',
+                'structured_content' => [
+                    'template' => [
+                        'name' => trim($templateName),
+                        'language' => trim($languageCode),
+                        'category' => null,
+                        'header' => null,
+                        'body' => null,
+                        'footer' => null,
+                        'resolved_parameters' => $components,
+                        'buttons' => [],
+                        'media_reference' => null,
+                    ],
+                ],
+                'response' => $response['data'] ?? [],
+            ]),
             'sender_user_id' => $actorId ?: null,
         ]);
         $this->upsertConversationPreservingActivity((int) $instance['id'], (string) $conversation['remote_jid'], [
@@ -682,24 +1071,48 @@ class Chat_service
     /** @return array<string,mixed> */
     public function public_settings(): array
     {
-        $globalKey = (string) $this->settings->get_value(self::SETTING_GLOBAL_API_KEY, '');
-        $webhookSecret = (string) $this->settings->get_value(Chat_settings_model::WEBHOOK_SECRET, '');
+        $stored = $this->settings->get_values([
+            self::SETTING_GLOBAL_API_KEY,
+            Chat_settings_model::WEBHOOK_SECRET,
+            self::SETTING_BASE_URL,
+            Chat_settings_model::EVOLUTION_TIMEOUT_SECONDS,
+            Chat_settings_model::POLLING_INTERVAL_MS,
+            Chat_settings_model::ENDPOINT_CONNECTION_STATE,
+            Chat_settings_model::ENDPOINT_FIND_CHATS,
+            Chat_settings_model::ENDPOINT_FIND_MESSAGES,
+            Chat_settings_model::ENDPOINT_SEND_TEXT,
+            Chat_settings_model::ENDPOINT_SEND_MEDIA,
+            Chat_settings_model::ENDPOINT_SEND_REACTION,
+            Chat_settings_model::ENDPOINT_SEND_AUDIO,
+            Chat_settings_model::ENDPOINT_MEDIA_BASE64,
+            'module_name', 'timezone', 'conversation_page_size', 'sound_enabled',
+            'browser_notifications_enabled', 'auto_mark_read', 'default_status', 'default_priority',
+            'auto_resolve_hours', 'evolution_retries', 'campaign_window_start', 'campaign_window_end',
+            'campaign_default_rate_limit_per_minute', 'campaign_recipient_max_attempts', 'campaign_retry_delay_seconds',
+            'campaign_pause_after_errors', 'quick_replies_json', 'bot_enabled', 'bot_session_timeout_minutes',
+            'bot_default_fallback', 'bot_default_handoff', 'log_sanitized_webhooks', 'webhook_retention_days',
+            'conversation_retention_days', 'media_retention_days', 'secure_media',
+        ]);
+        $setting = static fn (string $key, $default = null) => array_key_exists($key, $stored) && $stored[$key] !== null ? $stored[$key] : $default;
+        $globalKey = (string) $setting(self::SETTING_GLOBAL_API_KEY, '');
+        $webhookSecret = (string) $setting(Chat_settings_model::WEBHOOK_SECRET, '');
 
         $result = [
-            'evolution_base_url' => (string) $this->settings->get_value(self::SETTING_BASE_URL, ''),
+            'evolution_base_url' => (string) $setting(self::SETTING_BASE_URL, ''),
             'global_api_key_masked' => $this->maskSecret($globalKey),
             'has_global_api_key' => $globalKey !== '',
-            'request_timeout_seconds' => (int) $this->settings->get_value(Chat_settings_model::EVOLUTION_TIMEOUT_SECONDS, 30),
-            'polling_interval_ms' => (int) $this->settings->get_value(Chat_settings_model::POLLING_INTERVAL_MS, 5000),
+            'request_timeout_seconds' => (int) $setting(Chat_settings_model::EVOLUTION_TIMEOUT_SECONDS, 30),
+            'polling_interval_ms' => (int) $setting(Chat_settings_model::POLLING_INTERVAL_MS, 5000),
             'webhook_secret_masked' => $this->maskSecret($webhookSecret),
             'has_webhook_secret' => $webhookSecret !== '',
-            'connection_status_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_CONNECTION_STATE, '/instance/connectionState/{instance}'),
-            'find_chats_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_FIND_CHATS, '/chat/findChats/{instance}'),
-            'find_messages_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_FIND_MESSAGES, '/chat/findMessages/{instance}'),
-            'send_text_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_SEND_TEXT, '/message/sendText/{instance}'),
-            'send_media_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_SEND_MEDIA, '/message/sendMedia/{instance}'),
-            'send_audio_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_SEND_AUDIO, '/message/sendWhatsAppAudio/{instance}'),
-            'get_media_base64_path' => (string) $this->settings->get_value(Chat_settings_model::ENDPOINT_MEDIA_BASE64, '/chat/getBase64FromMediaMessage/{instance}'),
+            'connection_status_path' => (string) $setting(Chat_settings_model::ENDPOINT_CONNECTION_STATE, '/instance/connectionState/{instance}'),
+            'find_chats_path' => (string) $setting(Chat_settings_model::ENDPOINT_FIND_CHATS, '/chat/findChats/{instance}'),
+            'find_messages_path' => (string) $setting(Chat_settings_model::ENDPOINT_FIND_MESSAGES, '/chat/findMessages/{instance}'),
+            'send_text_path' => (string) $setting(Chat_settings_model::ENDPOINT_SEND_TEXT, '/message/sendText/{instance}'),
+            'send_media_path' => (string) $setting(Chat_settings_model::ENDPOINT_SEND_MEDIA, '/message/sendMedia/{instance}'),
+            'send_reaction_path' => (string) $setting(Chat_settings_model::ENDPOINT_SEND_REACTION, '/message/sendReaction/{instance}'),
+            'send_audio_path' => (string) $setting(Chat_settings_model::ENDPOINT_SEND_AUDIO, '/message/sendWhatsAppAudio/{instance}'),
+            'get_media_base64_path' => (string) $setting(Chat_settings_model::ENDPOINT_MEDIA_BASE64, '/chat/getBase64FromMediaMessage/{instance}'),
         ];
 
         $defaults = [
@@ -710,7 +1123,7 @@ class Chat_service
             'browser_notifications_enabled' => 0,
             'auto_mark_read' => 1,
             'default_status' => 'open',
-            'default_priority' => 'normal',
+            'default_priority' => Conversation_workflow_service::canonicalPriority($setting('default_priority', 'medium')),
             'auto_resolve_hours' => 0,
             'evolution_retries' => 2,
             'campaign_window_start' => '08:00',
@@ -738,7 +1151,7 @@ class Chat_service
             'conversation_retention_days', 'media_retention_days', 'secure_media',
         ];
         foreach ($defaults as $key => $default) {
-            $value = $this->settings->get_value($key, $default);
+            $value = $setting($key, $default);
             $result[$key] = in_array($key, $integerKeys, true) ? (int) $value : (string) $value;
         }
 
@@ -815,6 +1228,7 @@ class Chat_service
             Chat_settings_model::ENDPOINT_FIND_MESSAGES => (string) ($values['find_messages_path'] ?? ''),
             Chat_settings_model::ENDPOINT_SEND_TEXT => (string) ($values['send_text_path'] ?? ''),
             Chat_settings_model::ENDPOINT_SEND_MEDIA => (string) ($values['send_media_path'] ?? ''),
+            Chat_settings_model::ENDPOINT_SEND_REACTION => (string) ($values['send_reaction_path'] ?? ''),
             Chat_settings_model::ENDPOINT_SEND_AUDIO => (string) ($values['send_audio_path'] ?? ''),
             Chat_settings_model::ENDPOINT_MEDIA_BASE64 => (string) ($values['get_media_base64_path'] ?? '/chat/getBase64FromMediaMessage/{instance}'),
         ];
@@ -922,6 +1336,10 @@ class Chat_service
             : 'event|' . $eventKey;
         $lockName = 'chat_webhook_' . substr(hash('sha256', $lockIdentity), 0, 40);
         if (!$this->acquireNamedLock($lockName, 2)) {
+            $terminal = $this->terminalWebhookResult($eventKey, $event);
+            if ($terminal !== null) {
+                return $terminal;
+            }
             if ($this->webhookLogs->was_processed($eventKey)) {
                 return ['processed' => false, 'duplicate' => true, 'event' => $event];
             }
@@ -948,6 +1366,10 @@ class Chat_service
         }
 
         try {
+            $terminal = $this->terminalWebhookResult($eventKey, $event);
+            if ($terminal !== null) {
+                return $terminal;
+            }
             if ($this->webhookLogs->was_processed($eventKey)) {
                 return ['processed' => false, 'duplicate' => true, 'event' => $event];
             }
@@ -960,6 +1382,32 @@ class Chat_service
                 $result = empty($instance['active'])
                     ? ['kind' => 'ignored', 'reason' => 'instance_inactive']
                     : $this->applyWebhookEvent($instance, $normalized, $payload);
+                if ($this->isPendingWebhookResult($result)) {
+                    $pendingResult = array_merge([
+                        'processed' => false,
+                        'duplicate' => false,
+                        'pending' => true,
+                        'retryable' => true,
+                        'http_status' => 202,
+                        'event' => $event,
+                    ], $result);
+                    $this->webhookLogs->record_event([
+                        'instance_id' => (int) $instance['id'],
+                        'event_name' => $event !== '' ? $event : 'unknown',
+                        'event_dedupe_key' => $eventKey,
+                        'payload' => $payloadForLog,
+                        'response_payload' => $pendingResult,
+                        'error_message' => 'reaction_target_pending',
+                        'http_status' => 202,
+                        'success' => 0,
+                        'processed_at' => null,
+                    ]);
+                    if (!$persistWebhookPayload && is_array($safePayload)) {
+                        $this->enqueueWebhookRetry($eventKey, $safePayload);
+                    }
+
+                    return $pendingResult;
+                }
                 $this->webhookLogs->record_event([
                     'instance_id' => (int) $instance['id'],
                     'event_name' => $event !== '' ? $event : 'unknown',
@@ -1037,6 +1485,11 @@ class Chat_service
                 throw new InvalidArgumentException('Status de mensagem nao suportado.');
             }
 
+            $reactionAttempt = $this->messageReactions->findByProviderEventId((int) $instance['id'], $externalId);
+            if ($reactionAttempt) {
+                return $this->applyReactionStatusEvent($instance, $normalized, $reactionAttempt, $status);
+            }
+
             // Delivery receipts also advance internal campaign recipients.
             // This call is intentionally safe when the external ID does not
             // belong to a campaign.
@@ -1053,16 +1506,37 @@ class Chat_service
 
             $previousStatus = strtolower(trim((string) ($message['status'] ?? '')));
             $updated = false;
-            if ($this->shouldAdvanceMessageStatus($previousStatus, $status)) {
-                $updatePayload = ['status' => $status];
-                if ($status === 'failed') { $updatePayload['failed_at'] = gmdate('Y-m-d H:i:s'); $updatePayload['delivery_error'] = mb_substr(trim((string) ($normalized['delivery_error'] ?? 'Falha reportada pelo provedor.')), 0, 1000); }
+            $updatePayload = [];
+            $advancesStatus = $this->shouldAdvanceMessageStatus($previousStatus, $status);
+            if ($advancesStatus) {
+                $updatePayload['status'] = $status;
+            }
+            $eventAt = $this->providerEventDate($normalized['timestamp'] ?? null);
+            if ($status === 'sent' && $eventAt !== null && empty($message['sent_at'])) {
+                $updatePayload['sent_at'] = $eventAt;
+            }
+            if ($status === 'delivered' && $eventAt !== null && empty($message['delivered_at'])) {
+                $updatePayload['delivered_at'] = $eventAt;
+            }
+            if ($status === 'read' && $eventAt !== null && empty($message['read_at'])) {
+                $updatePayload['read_at'] = $eventAt;
+            }
+            if ($status === 'failed'
+                && !in_array($previousStatus, ['delivered', 'read'], true)
+                && empty($message['failed_at'])) {
+                // Keep the provider timestamp when it is present and valid;
+                // local processing time is only a last-resort failure time.
+                $updatePayload['failed_at'] = $eventAt ?? gmdate('Y-m-d H:i:s');
+                $updatePayload['delivery_error'] = mb_substr(trim((string) ($normalized['delivery_error'] ?? 'Falha reportada pelo provedor.')), 0, 1000);
+            }
+            if ($updatePayload !== []) {
                 $updated = $this->messages->update_message((int) $message['id'], $updatePayload);
                 if (!$updated || $this->db->affectedRows() < 1) {
                     throw new RuntimeException('Atualizacao de status nao afetou a mensagem; evento mantido pendente.');
                 }
-                if ($status === 'failed') {
-                    try { (new Notification_service())->create('message_failed', 'Falha de entrega', 'A Evolution reportou falha na entrega de uma mensagem.', 'conversation', (int) $message['conversation_id'], null, 'danger', 'delivery-failed|' . $instance['id'] . '|' . $externalId); } catch (Throwable $exception) { /* Status update remains primary. */ }
-                }
+            }
+            if ($status === 'failed' && $advancesStatus) {
+                try { (new Notification_service())->create('message_failed', 'Falha de entrega', 'O provedor reportou falha na entrega de uma mensagem.', 'conversation', (int) $message['conversation_id'], null, 'danger', 'delivery-failed|' . $instance['id'] . '|' . $externalId); } catch (Throwable $exception) { /* Status update remains primary. */ }
             }
 
             return [
@@ -1072,6 +1546,10 @@ class Chat_service
                 'status' => $status,
                 'updated' => $updated,
             ];
+        }
+
+        if ($this->isReactionEvent($normalized)) {
+            return $this->applyReactionEvent($instance, $normalized);
         }
 
         if (empty($normalized['remote_jid'])) {
@@ -1090,6 +1568,9 @@ class Chat_service
         array $raw,
         bool $incrementUnread
     ): array {
+        if ($this->isReactionEvent($normalized)) {
+            return $this->applyReactionEvent($instance, $normalized);
+        }
         $instanceId = (int) $instance['id'];
         $remoteJid = trim((string) ($normalized['remote_jid'] ?? ''));
         if ($remoteJid === '' || $remoteJid === 'status@broadcast') {
@@ -1163,13 +1644,10 @@ class Chat_service
                 $conversationData['last_message_preview'] = $this->messagePreview($normalized);
                 $conversationData['last_message_at'] = $sentAt;
             }
-            if (!$fromMe) {
-                $conversationData['last_customer_message_at'] = $sentAt;
-                if ($providerName === 'meta_cloud') {
-                    $hours = min(24, max(1, (int) $this->settings->get_value('meta_service_window_hours', 24)));
-                    $conversationData['service_window_expires_at'] = gmdate('Y-m-d H:i:s', $timestamp + ($hours * 3600));
-                }
-            }
+            $conversationData = array_merge(
+                $conversationData,
+                $this->serviceWindow->customerWindowData($existingConversation ?: [], $normalized, $fromMe, $timestamp, $providerName)
+            );
 
             $messageStatus = strtolower(trim((string) (
                 $normalized['message_status'] ?? ($fromMe ? 'sent' : 'received')
@@ -1200,8 +1678,9 @@ class Chat_service
                     'text_content' => $this->boundedText((string) ($normalized['text'] ?? '')),
                     'media_url' => $this->safeMediaUrl($normalized['media_url'] ?? null),
                     'mime_type' => $this->safeMimeType($normalized['mime_type'] ?? null),
-                    'caption' => in_array($messageType, ['image','audio','video','document'], true) ? $this->boundedText((string) ($normalized['text'] ?? ''), 4096) : null,
+                    'caption' => in_array($messageType, ['image','audio','voice','video','document','sticker'], true) ? $this->boundedText((string) ($normalized['text'] ?? ''), 4096) : null,
                     'file_name' => isset($normalized['file_name']) ? $this->boundedText((string) $normalized['file_name'], 255) : null,
+                    'reply_to_external_message_id' => $this->validReplyExternalId($normalized['reply_to_external_message_id'] ?? $normalized['context_message_id'] ?? null),
                     'status' => $messageStatus,
                     'sent_at' => $sentAt,
                     'message_timestamp' => $timestamp,
@@ -1613,8 +2092,12 @@ class Chat_service
         if ($name === '') {
             $name = $phone !== '' ? $phone : (string) $row['remote_jid'];
         }
+        $provider = (string) ($instance['provider_type'] ?? 'evolution');
+        $capabilities = Provider_capabilities::forProvider($provider);
+        $serviceWindow = $this->serviceWindow->state($row, $capabilities);
 
         return [
+            'contract_version' => 2,
             'id' => (int) $row['id'],
             'instance_id' => (int) $row['instance_id'],
             'instance_name' => (string) ($instance['name'] ?? ''),
@@ -1631,18 +2114,55 @@ class Chat_service
             'archived' => (int) ($row['archived'] ?? 0) === 1,
             'status' => (string) ($row['status'] ?? 'open'),
             'contact_id' => isset($row['contact_id']) ? (int) $row['contact_id'] : null,
-            'priority' => (string) ($row['priority'] ?? 'normal'),
+            'priority' => Conversation_workflow_service::canonicalPriority($row['priority'] ?? 'none'),
+            'priority_legacy' => (($row['priority'] ?? '') === 'normal') ? 'normal' : null,
             'assignee_id' => isset($row['assignee_id']) ? (int) $row['assignee_id'] : null,
             'assignee' => (string) ($row['_assignee_name'] ?? ''),
+            'assignee_details' => isset($row['assignee_id']) && (int) $row['assignee_id'] > 0 ? [
+                'id' => (int) $row['assignee_id'],
+                'name' => (string) ($row['_assignee']['name'] ?? $row['_assignee_name'] ?? ''),
+                'avatar' => (string) ($row['_assignee']['avatar'] ?? ''),
+            ] : null,
+            'assignment' => [
+                'user' => isset($row['assignee_id']) && (int) $row['assignee_id'] > 0 ? [
+                    'id' => (int) $row['assignee_id'],
+                    'name' => (string) ($row['_assignee_name'] ?? ''),
+                    'avatar' => (string) ($row['_assignee']['avatar'] ?? ''),
+                ] : null,
+                'team' => isset($row['team_id']) && (int) $row['team_id'] > 0 ? [
+                    'id' => (int) $row['team_id'],
+                    'name' => (string) ($row['_team_name'] ?? ''),
+                ] : null,
+            ],
             'team_id' => isset($row['team_id']) ? (int) $row['team_id'] : null,
+            'team' => isset($row['team_id']) && (int) $row['team_id'] > 0 ? [
+                'id' => (int) $row['team_id'],
+                'name' => (string) ($row['_team_name'] ?? ''),
+            ] : null,
+            'unread' => (int) ($row['unread_count'] ?? 0),
+            'is_unread' => (int) ($row['unread_count'] ?? 0) > 0,
             'resolved_at' => $this->toIsoDate($row['resolved_at'] ?? null),
+            'resolved_by' => isset($row['resolved_by']) ? (int) $row['resolved_by'] : null,
+            'snoozed_until' => $this->toIsoDate($row['snoozed_until'] ?? null),
+            'snoozed_by' => isset($row['snoozed_by']) ? (int) $row['snoozed_by'] : null,
             'conversation_type' => (string) ($row['conversation_type'] ?? ($this->isGroupJid((string) ($row['remote_jid'] ?? '')) ? 'group' : 'individual')),
             'is_group' => (string) ($row['conversation_type'] ?? '') === 'group' || $this->isGroupJid((string) ($row['remote_jid'] ?? '')),
             'group_id' => isset($row['group_id']) ? (int) $row['group_id'] : null,
-            'provider_name' => (string) ($instance['provider_type'] ?? 'evolution'),
+            'provider_name' => $provider,
+            'provider' => $provider,
+            'capabilities' => Provider_capabilities::forProvider($provider),
+            'instance' => [
+                'id' => (int) ($row['instance_id'] ?? 0),
+                'name' => (string) ($instance['name'] ?? ''),
+                'provider' => $provider,
+                'connection_status' => (string) ($instance['connection_status'] ?? 'disconnected'),
+                'capabilities' => $capabilities,
+            ],
             'last_customer_message_at' => $this->toIsoDate($row['last_customer_message_at'] ?? null),
             'service_window_expires_at' => $this->toIsoDate($row['service_window_expires_at'] ?? null),
-            'service_window_open' => !empty($row['service_window_expires_at']) && strtotime((string) $row['service_window_expires_at']) > time(),
+            'service_window' => $serviceWindow,
+            // Legacy aliases are retained as projections of the canonical DTO.
+            'service_window_open' => $serviceWindow['open'],
             'bot_status' => (string) ($row['bot_status'] ?? 'active'),
             'bot_paused_at' => $this->toIsoDate($row['bot_paused_at'] ?? null),
             'bot_handoff_reason' => (string) ($row['bot_handoff_reason'] ?? ''),
@@ -1656,10 +2176,23 @@ class Chat_service
     private function mapMessage(array $row): array
     {
         $messageType = (string) ($row['message_type'] ?? 'text');
-        $hasMedia = in_array($messageType, ['image', 'audio', 'video', 'document'], true)
+        $senderName = trim((string) ($row['sender_name'] ?? ''));
+        if (($messageType === 'internal_note' || !empty($row['is_internal_note'])) && $senderName === '' && !empty($row['sender_user_id'])) {
+            try {
+                $author = $this->db->table('users')->select('first_name, last_name')->where('id', (int) $row['sender_user_id'])->where('deleted', 0)->get(1)->getRowArray();
+                $senderName = trim((string) ($author['first_name'] ?? '') . ' ' . (string) ($author['last_name'] ?? ''));
+            } catch (Throwable $exception) {
+                $senderName = '';
+            }
+            if ($senderName !== '') $row['sender_name'] = $senderName;
+        }
+        $hasMedia = in_array($messageType, ['image', 'audio', 'voice', 'video', 'document', 'sticker'], true)
             || !empty($row['media_id'])
             || !empty($row['media_url']);
-        return [
+        $mediaUrl = !empty($row['media_id'])
+            ? (function_exists('get_uri') ? get_uri('chatwoot_plugin/api/media/' . (int) $row['media_id']) : '/chatwoot_plugin/api/media/' . (int) $row['media_id'])
+            : ($hasMedia ? (function_exists('get_uri') ? get_uri('chatwoot_plugin/api/media/message/' . (int) $row['id']) : '/chatwoot_plugin/api/media/message/' . (int) $row['id']) : null);
+        $legacy = [
             'id' => (int) $row['id'],
             'conversation_id' => (int) $row['conversation_id'],
             'instance_id' => (int) $row['instance_id'],
@@ -1669,9 +2202,7 @@ class Chat_service
             'direction' => (string) $row['direction'],
             'message_type' => $messageType,
             'text_content' => (string) ($row['text_content'] ?? ''),
-            'media_url' => !empty($row['media_id'])
-                ? (function_exists('get_uri') ? get_uri('chatwoot_plugin/api/media/' . (int) $row['media_id']) : '/chatwoot_plugin/api/media/' . (int) $row['media_id'])
-                : ($hasMedia ? (function_exists('get_uri') ? get_uri('chatwoot_plugin/api/media/message/' . (int) $row['id']) : '/chatwoot_plugin/api/media/message/' . (int) $row['id']) : null),
+            'media_url' => $mediaUrl,
             'mime_type' => $this->safeMimeType($row['mime_type'] ?? null),
             'caption' => (string) ($row['caption'] ?? ''),
             'file_name' => (string) ($row['file_name'] ?? ''),
@@ -1686,13 +2217,87 @@ class Chat_service
             'provider_name' => (string) ($row['provider_name'] ?? 'evolution'),
             'provider_payload_id' => $row['provider_payload_id'] ?? null,
             'is_internal_note' => !empty($row['is_internal_note']),
+            'mentions' => (($messageType === 'internal_note' || !empty($row['is_internal_note']))
+                ? (array_key_exists('_mentions', $row)
+                    ? (array) $row['_mentions']
+                    : $this->noteMentionsForMessage((int) ($row['id'] ?? 0)))
+                : []),
+            'reply_to_external_message_id' => $row['reply_to_external_message_id'] ?? null,
             'delivery_error' => $row['delivery_error'] ?? null,
+            'failed_at' => $this->toIsoDate($row['failed_at'] ?? null),
+            'delivered_at' => $this->toIsoDate($row['delivered_at'] ?? null),
+            'read_at' => $this->toIsoDate($row['read_at'] ?? null),
             'status' => (string) ($row['status'] ?? 'received'),
             'sent_at' => $this->toIsoDate($row['sent_at'] ?? $row['created_at'] ?? null),
             'message_timestamp' => isset($row['message_timestamp']) ? (int) $row['message_timestamp'] : null,
             'created_at' => $this->toIsoDate($row['created_at'] ?? null),
             'updated_at' => $this->toIsoDate($row['updated_at'] ?? null),
         ];
+
+        $replyTarget = null;
+        $replyExternalId = trim((string) ($row['reply_to_external_message_id'] ?? ''));
+        if ($replyExternalId !== '') {
+            $replyTarget = $this->messages->find_by_external_id((int) ($row['instance_id'] ?? 0), $replyExternalId);
+            if ($replyTarget && (int) ($replyTarget['conversation_id'] ?? 0) !== (int) ($row['conversation_id'] ?? 0)) {
+                $replyTarget = null;
+            }
+        }
+
+        return array_merge(
+            $legacy,
+            $this->messageProjection->project(array_merge($row, ['media_url' => $mediaUrl]), $replyTarget)
+        );
+    }
+
+    /** @return array<int,array{id:int,name:string,avatar:string}> */
+    private function noteMentionsForMessage(int $messageId): array
+    {
+        if ($messageId < 1 || !$this->db->tableExists($this->db->prefixTable('chat_internal_note_mentions'), false)) {
+            return [];
+        }
+        $rows = $this->db->table('chat_internal_note_mentions m')
+            ->select('m.mentioned_user_id, u.first_name, u.last_name')
+            ->join('users u', 'u.id = m.mentioned_user_id', 'inner')
+            ->where('m.message_id', $messageId)
+            ->where('m.deleted', 0)
+            ->where('u.deleted', 0)
+            ->get()->getResultArray();
+        return array_map(static fn (array $row): array => [
+            'id' => (int) ($row['mentioned_user_id'] ?? 0),
+            'name' => trim((string) ($row['first_name'] ?? '') . ' ' . (string) ($row['last_name'] ?? '')),
+            'avatar' => '',
+        ], $rows);
+    }
+
+    /** @return array<int,array<int,array{id:int,name:string,avatar:string}>> */
+    private function noteMentionsForMessages(array $messages): array
+    {
+        $ids = [];
+        foreach ($messages as $message) {
+            if (((string) ($message['message_type'] ?? '') === 'internal_note' || !empty($message['is_internal_note'])) && (int) ($message['id'] ?? 0) > 0) {
+                $ids[] = (int) $message['id'];
+            }
+        }
+        $ids = array_values(array_unique($ids));
+        if (!$ids || !$this->db->tableExists($this->db->prefixTable('chat_internal_note_mentions'), false)) return [];
+        $rows = $this->db->table('chat_internal_note_mentions m')
+            ->select('m.message_id, m.mentioned_user_id, u.first_name, u.last_name')
+            ->join('users u', 'u.id = m.mentioned_user_id', 'inner')
+            ->whereIn('m.message_id', $ids)
+            ->where('m.deleted', 0)
+            ->where('u.deleted', 0)
+            ->get()->getResultArray();
+        $map = array_fill_keys($ids, []);
+        foreach ($rows as $row) {
+            $messageId = (int) ($row['message_id'] ?? 0);
+            if (!array_key_exists($messageId, $map)) $map[$messageId] = [];
+            $map[$messageId][] = [
+                'id' => (int) ($row['mentioned_user_id'] ?? 0),
+                'name' => trim((string) ($row['first_name'] ?? '') . ' ' . (string) ($row['last_name'] ?? '')),
+                'avatar' => '',
+            ];
+        }
+        return $map;
     }
 
     /** @return array<int,int> */
@@ -1706,6 +2311,7 @@ class Chat_service
         $rows = $this->db->table($this->db->prefixTable('chat_messages'))
             ->select('instance_id, COUNT(id) AS total', false)
             ->whereIn('instance_id', $instanceIds)
+            ->where('message_type !=', 'reaction')
             ->where('deleted', 0)
             ->where('created_at >=', gmdate('Y-m-d 00:00:00'))
             ->groupBy('instance_id')
@@ -1750,6 +2356,27 @@ class Chat_service
         return [$timestamp, gmdate('Y-m-d H:i:s', $timestamp)];
     }
 
+    private function providerEventDate($value): ?string
+    {
+        if (is_numeric($value)) {
+            $timestamp = (int) $value;
+            if ($timestamp > 20000000000) {
+                $timestamp = (int) floor($timestamp / 1000);
+            }
+        } elseif (is_string($value) && trim($value) !== '') {
+            $parsed = strtotime($value);
+            $timestamp = $parsed === false ? 0 : $parsed;
+        } else {
+            return null;
+        }
+
+        if ($timestamp < 1 || $timestamp > time() + 315360000) {
+            return null;
+        }
+
+        return gmdate('Y-m-d H:i:s', $timestamp);
+    }
+
     private function messagePreview(array $normalized): string
     {
         $text = trim((string) ($normalized['text'] ?? ''));
@@ -1760,7 +2387,16 @@ class Chat_service
         return match ($this->allowedMessageType((string) ($normalized['message_type'] ?? ''))) {
             'image' => '[Imagem]',
             'audio' => '[Audio]',
+            'voice' => '[Audio]',
             'document' => '[Documento]',
+            'video' => '[Video]',
+            'sticker' => '[Sticker]',
+            'location' => '[Localizacao]',
+            'contact' => '[Contato]',
+            'template' => '[Template]',
+            'interactive' => '[Interacao]',
+            'reaction' => '[Reacao]',
+            'unsupported' => '[Mensagem nao suportada]',
             default => '[Mensagem]',
         };
     }
@@ -1776,7 +2412,11 @@ class Chat_service
     {
         $type = strtolower(trim($type));
 
-        return in_array($type, ['text', 'image', 'audio', 'video', 'document', 'template', 'sticker', 'reaction', 'location', 'contact'], true) ? $type : 'text';
+        return in_array($type, [
+            'text', 'image', 'audio', 'voice', 'video', 'document', 'template',
+            'sticker', 'reaction', 'location', 'contact', 'interactive',
+            'internal_note', 'activity', 'unsupported',
+        ], true) ? $type : 'unsupported';
     }
 
     /**
@@ -1791,10 +2431,23 @@ class Chat_service
      */
     private function messageRawPayload(array $raw, string $messageType, string $providerName, array $normalized): array
     {
-        if (in_array($messageType, ['image', 'audio', 'video', 'document', 'sticker', 'location', 'contact'], true)) {
+        if (in_array($messageType, ['image', 'audio', 'voice', 'video', 'document', 'sticker', 'location', 'contact', 'template', 'interactive', 'reaction', 'unsupported'], true)) {
             $payload = $this->sanitizer->sanitize($raw);
+            if (!is_array($payload)) {
+                $payload = ['_truncated' => true];
+            }
 
-            return is_array($payload) ? $payload : [];
+            $payload['_normalized'] = [
+                'message_type' => $messageType,
+                'raw_provider_type' => $this->boundedText((string) ($normalized['raw_provider_type'] ?? $normalized['message_type'] ?? ''), 64),
+                'provider_name' => $providerName,
+                'text' => $this->boundedText((string) ($normalized['text'] ?? ''), 10000),
+                'structured_content' => is_array($normalized['structured_content'] ?? null) ? $this->sanitizer->sanitize($normalized['structured_content']) : [],
+                'context_message_id' => $this->boundedText((string) ($normalized['context_message_id'] ?? ''), 191),
+                'reply_to_external_message_id' => $this->boundedText((string) ($normalized['reply_to_external_message_id'] ?? ''), 191),
+            ];
+
+            return $payload;
         }
 
         return [
@@ -2003,6 +2656,354 @@ class Chat_service
             && preg_match('/[\x00-\x20\x7F]/', $externalId) !== 1;
     }
 
+    private function isReactionEvent(array $normalized): bool
+    {
+        if (strtolower(trim((string) ($normalized['message_type'] ?? ''))) === 'reaction') return true;
+        $structured = $normalized['structured_content'] ?? null;
+        return is_array($structured) && is_array($structured['reaction'] ?? null);
+    }
+
+    private function isPendingWebhookResult(array $result): bool
+    {
+        return !empty($result['pending'])
+            || (($result['kind'] ?? '') === 'reaction' && empty($result['resolved']) && !empty($result['target_provider_message_id']));
+    }
+
+    /** @return array<string,mixed>|null */
+    private function terminalWebhookResult(string $eventKey, string $event): ?array
+    {
+        $terminal = $this->webhookLogs->find_terminal($eventKey);
+        if ($terminal === null) {
+            return null;
+        }
+
+        return [
+            'processed' => false,
+            'duplicate' => true,
+            'pending' => false,
+            'retryable' => false,
+            'terminal' => true,
+            'retry_exhausted' => true,
+            'http_status' => 422,
+            'event' => $event,
+            'error' => 'retry_exhausted',
+            'terminal_log_id' => (int) ($terminal['id'] ?? 0),
+        ];
+    }
+
+    private function reactionFailureState(array $response): string
+    {
+        $status = (int) ($response['status_code'] ?? 0);
+        if ($status === 429) return 'retryable_failure';
+        if ($status >= 400 && $status < 500) return 'rejected';
+        return 'ambiguous_failure';
+    }
+
+    /** @return array<string,mixed> */
+    private function applyReactionEvent(array $instance, array $normalized): array
+    {
+        $structured = is_array($normalized['structured_content'] ?? null) ? $normalized['structured_content'] : [];
+        $reaction = is_array($structured['reaction'] ?? null) ? $structured['reaction'] : [];
+        $targetExternalId = trim((string) ($reaction['message_id'] ?? $reaction['target_message_id'] ?? ''));
+        if ($targetExternalId === '') {
+            return ['kind' => 'reaction', 'resolved' => false, 'reason' => 'target_missing'];
+        }
+
+        $target = $this->messages->find_by_external_id((int) ($instance['id'] ?? 0), $targetExternalId);
+        if (!$target) {
+            return [
+                'kind' => 'reaction',
+                'resolved' => false,
+                'pending' => true,
+                'retryable' => true,
+                'reason' => 'target_pending',
+                'target_provider_message_id' => $targetExternalId,
+            ];
+        }
+
+        $conversationId = (int) ($target['conversation_id'] ?? 0);
+        $applied = $this->messageReactions->applyIncoming($instance, $normalized, $conversationId);
+        $target = $this->messages->get_by_id((int) $target['id']) ?: $target;
+        $target['reactions'] = $this->messageReactions->aggregates([(int) $target['id']])[(int) $target['id']] ?? [];
+
+        return [
+            'kind' => 'reaction',
+            'resolved' => $applied,
+            'message_id' => (int) $target['id'],
+            'target_provider_message_id' => $targetExternalId,
+            'data' => $this->mapMessage($target),
+        ];
+    }
+
+    /** @return array<string,mixed> */
+    private function applyReactionStatusEvent(array $instance, array $normalized, array $attempt, string $status): array
+    {
+        $beforeAttempt = $this->messageReactions->findAttempt((int) $attempt['id']) ?: $attempt;
+        $providerTimestamp = $this->providerEventDate($normalized['timestamp'] ?? null);
+        $errorCode = trim((string) ($normalized['delivery_error_code'] ?? $normalized['provider_error_code'] ?? '')) ?: null;
+        $errorMessage = trim((string) ($normalized['delivery_error'] ?? $normalized['provider_error_message'] ?? '')) ?: null;
+        if ($status === 'failed') {
+            $sendState = $this->reactionWebhookFailureState($normalized, $errorCode, $errorMessage);
+        } else {
+            $sendState = 'sent';
+        }
+        $updated = $this->messageReactions->updateAttemptProviderStatus(
+            (int) $attempt['id'],
+            $status,
+            $errorCode,
+            $errorMessage,
+            $providerTimestamp,
+            $sendState,
+            (string) ($normalized['external_message_id'] ?? $attempt['provider_event_id'] ?? '')
+        );
+        $freshAttempt = $this->messageReactions->findAttempt((int) $attempt['id']) ?: $attempt;
+        if ($status !== 'failed' && ($freshAttempt['send_state'] ?? '') === 'sent') {
+            // Receipts advance V012 only. If V011 was lost during a crash,
+            // confirmAttemptState may reconstruct it using the original
+            // attempt order; it never uses delivery/read time as reaction
+            // authority and refuses to overwrite a later state.
+            $this->messageReactions->confirmAttemptState(
+                (int) $attempt['id'],
+                (string) ($normalized['external_message_id'] ?? $attempt['provider_event_id'] ?? '')
+            );
+        } elseif ($status === 'failed' && !$this->isStaleReactionFailure($freshAttempt, $providerTimestamp)) {
+            $this->messageReactions->reconcileFailedAttempt($freshAttempt);
+        }
+
+        return [
+            'kind' => 'reaction_status',
+            'attempt_id' => (int) $attempt['id'],
+            'provider_event_id' => (string) ($attempt['provider_event_id'] ?? $normalized['external_message_id'] ?? ''),
+            'status' => $status,
+            'send_state' => (string) ($freshAttempt['send_state'] ?? $sendState),
+            'provider_error_code' => $errorCode,
+            'provider_error_message' => $errorMessage,
+            'updated' => $updated,
+        ];
+    }
+
+    private function isStaleReactionFailure(array $attempt, ?string $providerTimestamp): bool
+    {
+        if (in_array((string) ($attempt['provider_status'] ?? ''), ['delivered', 'read'], true)) return true;
+        $existingAt = trim((string) ($attempt['provider_status_at'] ?? ''));
+        if ($existingAt === '') return false;
+        if ($providerTimestamp === null) return true;
+        try {
+            return (new \DateTimeImmutable($providerTimestamp, new \DateTimeZone('UTC')))
+                < (new \DateTimeImmutable($existingAt, new \DateTimeZone('UTC')));
+        } catch (Throwable $exception) {
+            return true;
+        }
+    }
+
+    private function reactionWebhookFailureState(array $normalized, ?string $errorCode, ?string $errorMessage): string
+    {
+        $httpStatus = (int) ($normalized['delivery_error_http_status'] ?? $normalized['provider_error_http_status'] ?? 0);
+        if (in_array($httpStatus, [408, 425, 429], true) || $httpStatus >= 500) return 'ambiguous_failure';
+        $haystack = strtolower(($errorCode ?? '') . ' ' . ($errorMessage ?? ''));
+        if ($haystack !== '' && preg_match('/timeout|temporar|rate.?limit|throttl|network|unavailable|5\d\d/', $haystack)) return 'ambiguous_failure';
+        return $errorCode !== null || $errorMessage !== null ? 'rejected' : 'ambiguous_failure';
+    }
+
+    private function validReplyExternalId($value): ?string
+    {
+        $value = trim((string) $value);
+
+        return $this->isValidExternalMessageId($value) ? substr($value, 0, 191) : null;
+    }
+
+    /** @return array<string,mixed> */
+    private function textSendRawPayload(string $provider, ?int $replyToMessageId, ?string $replyExternalId): array
+    {
+        return [
+            'source' => 'rise_ui',
+            'provider' => $provider,
+            'send' => [
+                'idempotency_state' => 'awaiting_provider',
+                'reply_to_local_message_id' => $replyToMessageId,
+                'reply_to_external_message_id' => $replyExternalId,
+            ],
+        ];
+    }
+
+    private function textIdempotencyState(array $row): string
+    {
+        if (in_array(strtolower((string) ($row['status'] ?? '')), ['sent', 'delivered', 'read'], true)) return 'idempotent_success';
+        $raw = json_decode((string) ($row['raw_payload'] ?? ''), true);
+        $state = is_scalar($raw['send']['idempotency_state'] ?? null)
+            ? strtolower(trim((string) $raw['send']['idempotency_state']))
+            : '';
+        return in_array($state, ['retryable_failure', 'ambiguous_failure'], true) ? $state : 'ambiguous_failure';
+    }
+
+    private function hasReplyContext(array $row): bool
+    {
+        return $this->replyTargetLocalId($row) !== null
+            || trim((string) ($row['reply_to_external_message_id'] ?? '')) !== '';
+    }
+
+    private function replyTargetLocalId(array $row): ?int
+    {
+        $raw = json_decode((string) ($row['raw_payload'] ?? ''), true);
+        $candidate = $raw['send']['reply_to_local_message_id']
+            ?? $raw['media_engine']['reply_to_local_message_id']
+            ?? null;
+        if (is_numeric($candidate) && (int) $candidate > 0) return (int) $candidate;
+        $externalId = trim((string) ($row['reply_to_external_message_id'] ?? ''));
+        if ($externalId === '') return null;
+        $target = $this->messages->find_by_external_id((int) ($row['instance_id'] ?? 0), $externalId);
+        return $target && (int) ($target['id'] ?? 0) > 0 ? (int) $target['id'] : null;
+    }
+
+    /** @param array<string,mixed> $response */
+    private function normalizeTemplateValues(array $values): array
+    {
+        $normalize = static function ($value) use (&$normalize) {
+            if (is_array($value)) {
+                $result = [];
+                foreach ($value as $key => $item) $result[(string) $key] = $normalize($item);
+                ksort($result, SORT_STRING);
+                return $result;
+            }
+            if (is_bool($value)) return $value;
+            if (is_int($value) || is_float($value)) return (string) $value;
+            return trim((string) $value);
+        };
+        return $normalize($values);
+    }
+
+    /** @param array<string,mixed> $template */
+    private function templateDefinitionHash(array $template): string
+    {
+        return hash('sha256', json_encode([
+            'provider_template_id' => $template['provider_template_id'] ?? '',
+            'language' => $template['language'] ?? '',
+            'header' => $template['header'] ?? null,
+            'body' => $template['body'] ?? null,
+            'footer' => $template['footer'] ?? null,
+            'buttons' => $template['buttons'] ?? [],
+            'fields' => $template['fields'] ?? [],
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    }
+
+    /** @param array<int,array<string,mixed>> $components */
+    private function resolveTemplateMediaComponents(array $components, int $conversationId, int $instanceId, array $capabilities): array
+    {
+        foreach ($components as &$component) {
+            if (!is_array($component) || !is_array($component['parameters'] ?? null)) continue;
+            foreach ($component['parameters'] as &$parameter) {
+                if (!is_array($parameter)) continue;
+                foreach (['image', 'video', 'document'] as $kind) {
+                    $node = $parameter[$kind] ?? null;
+                    $localId = is_array($node) ? (int) ($node['local_media_id'] ?? 0) : 0;
+                    if ($localId < 1) continue;
+                    $parameter[$kind] = $this->mediaService->resolveTemplateMedia($localId, $conversationId, $instanceId, $kind, $capabilities);
+                }
+            }
+        }
+        unset($component, $parameter);
+        return $components;
+    }
+
+    /** Keep only provider-neutral text and local media references in history. */
+    private function sanitizeTemplateHistoryComponents(array $components): array
+    {
+        $result = [];
+        foreach ($components as $component) {
+            if (!is_array($component)) continue;
+            $type = strtolower(trim((string) ($component['type'] ?? '')));
+            if (!in_array($type, ['header', 'body', 'button'], true)) continue;
+            $clean = ['type' => $type, 'parameters' => []];
+            if ($type === 'button') {
+                if (isset($component['sub_type'])) $clean['sub_type'] = strtolower(trim((string) $component['sub_type']));
+                if (isset($component['index'])) $clean['index'] = (string) $component['index'];
+            }
+            foreach ((array) ($component['parameters'] ?? []) as $parameter) {
+                if (!is_array($parameter)) continue;
+                $parameterType = strtolower(trim((string) ($parameter['type'] ?? '')));
+                if ($parameterType === 'text' && is_scalar($parameter['text'] ?? null)) {
+                    $clean['parameters'][] = ['type' => 'text', 'text' => (string) $parameter['text']];
+                    continue;
+                }
+                if (!in_array($parameterType, ['image', 'video', 'document'], true)) continue;
+                $node = is_array($parameter[$parameterType] ?? null) ? $parameter[$parameterType] : [];
+                $localId = (int) ($node['local_media_id'] ?? 0);
+                if ($localId > 0) $clean['parameters'][] = ['type' => $parameterType, $parameterType => ['local_media_id' => $localId]];
+            }
+            $result[] = $clean;
+        }
+        return $result;
+    }
+
+    /** Keep local references in history; never persist provider links/tokens. */
+    private function sanitizeTemplateResolvedContent(array $resolved): array
+    {
+        if (is_array($resolved['media_reference'] ?? null)) {
+            $resolved['media_reference'] = [
+                'kind' => (string) ($resolved['media_reference']['kind'] ?? ''),
+                'local_media_id' => (int) ($resolved['media_reference']['local_media_id'] ?? 0),
+            ];
+        }
+        return $resolved;
+    }
+
+    /** @param array<string,mixed> $response */
+    private function providerFailureState(array $response): string
+    {
+        $status = (int) ($response['status_code'] ?? 0);
+        if ($status === 429) return 'retryable_failure';
+        if ($status === 408 || $status === 0 || $status >= 500) return 'ambiguous_failure';
+        if ($status >= 400 && $status < 500) return 'rejected';
+        return 'ambiguous_failure';
+    }
+
+    private function markTextFailed(int $messageId, array $instance, string $provider, string $error, int $actorId, string $state, int $statusCode): void
+    {
+        $row = $this->messages->get_by_id($messageId);
+        $row = is_array($row) ? $row : [];
+        $raw = is_array($row) ? json_decode((string) ($row['raw_payload'] ?? ''), true) : [];
+        if (!is_array($raw)) $raw = [];
+        if (!is_array($raw['send'] ?? null)) $raw['send'] = [];
+        $raw['send']['idempotency_state'] = $state;
+        $raw['send']['provider_status_code'] = $statusCode;
+        $raw['send']['error'] = mb_substr($error, 0, 500);
+        $this->messages->update_message($messageId, [
+            'status' => 'failed',
+            'provider_name' => $provider,
+            'delivery_error' => mb_substr($error, 0, 1000),
+            'failed_at' => gmdate('Y-m-d H:i:s'),
+            'raw_payload' => $raw,
+        ]);
+        try {
+            (new Notification_service())->create('message_failed', 'Falha ao enviar mensagem', $error, 'conversation', (int) ($row['conversation_id'] ?? 0), $actorId ?: null, 'danger', 'send-failed|' . (int) ($row['conversation_id'] ?? 0) . '|' . (string) ($row['client_message_id'] ?? $messageId));
+        } catch (Throwable $exception) { /* Provider failure remains primary. */ }
+        (new Audit_service())->record($actorId ?: null, 'message.send_failed', 'message', $messageId, (int) $instance['id'], [], ['error' => $error, 'provider' => $provider, 'send_state' => $state]);
+    }
+
+    /** @return array<string,mixed> */
+    private function resolveReplyTarget(int $conversationId, ?int $replyToMessageId, array $capabilities): array
+    {
+        if ($replyToMessageId === null) return [];
+        if (empty($capabilities['actions']['reply'])) {
+            throw new InvalidArgumentException('Este provedor nao suporta respostas contextuais.');
+        }
+        $target = $this->messages->get_by_id($replyToMessageId);
+        $externalId = $target ? $this->validReplyExternalId($target['external_message_id'] ?? null) : null;
+        if (!$target || (int) ($target['conversation_id'] ?? 0) !== $conversationId
+            || !empty($target['is_internal_note'])
+            || strtolower(trim((string) ($target['direction'] ?? ''))) === 'internal'
+            || strtolower(trim((string) ($target['status'] ?? ''))) === 'failed'
+            || $externalId === null) {
+            throw new InvalidArgumentException('A mensagem escolhida nao pode ser usada como resposta contextual.');
+        }
+
+        return [
+            'external_message_id' => $externalId,
+            'remote_jid' => trim((string) ($target['remote_jid'] ?? '')),
+            'from_me' => strtolower(trim((string) ($target['direction'] ?? ''))) === 'outgoing',
+        ];
+    }
+
     private function shouldAdvanceMessageStatus(string $currentStatus, string $nextStatus): bool
     {
         $currentStatus = strtolower(trim($currentStatus));
@@ -2015,7 +3016,7 @@ class Chat_service
             return !in_array($currentStatus, ['failed', 'delivered', 'read'], true);
         }
         if ($currentStatus === 'failed') {
-            return in_array($nextStatus, ['sent', 'delivered', 'read'], true);
+            return false;
         }
         if (!array_key_exists($nextStatus, self::MESSAGE_STATUS_RANK)) {
             return false;
@@ -2076,23 +3077,12 @@ class Chat_service
 
     private function acquireNamedLock(string $name, int $timeout): bool
     {
-        try {
-            $row = $this->db->query('SELECT GET_LOCK(?, ?) AS acquired_lock', [$name, $timeout])
-                ->getRowArray();
-
-            return (int) ($row['acquired_lock'] ?? 0) === 1;
-        } catch (Throwable $exception) {
-            return false;
-        }
+        return $this->sendLocks->acquire($name, $timeout);
     }
 
     private function releaseNamedLock(string $name): void
     {
-        try {
-            $this->db->query('SELECT RELEASE_LOCK(?)', [$name]);
-        } catch (Throwable $exception) {
-            log_message('error', 'Chatwoot_plugin could not release a named lock.');
-        }
+        $this->sendLocks->release($name);
     }
 
     private function isList(array $value): bool

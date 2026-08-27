@@ -8,11 +8,11 @@ interface WhatsAppProviderInterface
 {
     public function name(): string;
 
-    /** @return array<string,bool> */
+    /** @return array<string,mixed> Versioned capability document plus legacy aliases. */
     public function capabilities(): array;
 
     /** Stable public alias used by provider-neutral application code.
-     * @return array<string,bool>
+     * @return array<string,mixed> Versioned capability document plus legacy aliases.
      */
     public function getCapabilities(): array;
 
@@ -34,6 +34,9 @@ interface WhatsAppProviderInterface
 
     /** @return array<string,mixed> */
     public function sendMedia(string $recipient, array $media, array $context = []): array;
+
+    /** Send or remove a reaction for a provider message id. */
+    public function sendReaction(string $recipient, string $messageId, string $emoji, array $context = []): array;
 
     /** @return array<string,mixed> */
     public function sendTemplate(string $recipient, string $templateName, string $languageCode, array $components = [], array $context = []): array;

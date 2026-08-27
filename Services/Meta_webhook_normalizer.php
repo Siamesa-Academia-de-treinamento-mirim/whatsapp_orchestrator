@@ -72,6 +72,16 @@ class Meta_webhook_normalizer
         $text = $this->messageText($message, $type);
         $media = is_array($message[$type] ?? null) ? $message[$type] : [];
         $mediaId = trim((string) ($media['id'] ?? ''));
+        $structured = $this->structuredContent($message, $type);
+        if ($type === 'reaction' && is_array($structured['reaction'] ?? null)) {
+            $structured['reaction']['reactor_key'] = $from;
+            $structured['reaction']['provider_event_id'] = $id;
+            $structured['reaction']['from_me'] = false;
+            $structured['reaction']['provider_timestamp'] = isset($message['timestamp']) && is_numeric($message['timestamp'])
+                ? (string) $message['timestamp']
+                : null;
+        }
+        $contextMessageId = trim((string) ($message['context']['id'] ?? ''));
         return [
             'event' => 'messages.upsert',
             'instance' => $instance,
@@ -83,7 +93,9 @@ class Meta_webhook_normalizer
             'from_me' => false,
             'contact_name' => (string) ($contacts[$from] ?? ''),
             'sender_name' => (string) ($contacts[$from] ?? ''),
-            'timestamp' => (int) ($message['timestamp'] ?? time()),
+            'timestamp' => isset($message['timestamp']) && is_numeric($message['timestamp'])
+                ? (int) $message['timestamp']
+                : null,
             'message_type' => $this->messageType($type),
             'text' => $text,
             'mime_type' => trim((string) ($media['mime_type'] ?? '')) ?: null,
@@ -91,7 +103,12 @@ class Meta_webhook_normalizer
             'provider_name' => 'meta_cloud',
             'provider_payload_id' => $mediaId !== '' ? $mediaId : $id,
             'meta_phone_number_id' => $phoneNumberId,
-            'context_message_id' => trim((string) ($message['context']['id'] ?? '')) ?: null,
+            'provider_message_type' => $type,
+            'is_customer_message' => $this->qualifiesCustomerMessage($type),
+            'context_message_id' => $contextMessageId !== '' ? $contextMessageId : null,
+            'reply_to_external_message_id' => $contextMessageId !== '' ? $contextMessageId : null,
+            'structured_content' => $structured,
+            'is_voice_note' => (bool) ($structured['attachment']['is_voice_note'] ?? false),
             'raw_provider_type' => $type,
         ];
     }
@@ -106,8 +123,10 @@ class Meta_webhook_normalizer
         if ($mapped === '') return null;
         $recipient = preg_replace('/\D+/', '', (string) ($status['recipient_id'] ?? '')) ?: '';
         $error = '';
+        $errorCode = '';
         if (!empty($status['errors'][0]) && is_array($status['errors'][0])) {
             $error = trim((string) ($status['errors'][0]['message'] ?? $status['errors'][0]['title'] ?? ''));
+            $errorCode = trim((string) ($status['errors'][0]['code'] ?? $status['errors'][0]['error_code'] ?? ''));
         }
         return [
             'event' => 'messages.update',
@@ -118,19 +137,30 @@ class Meta_webhook_normalizer
             'remote_jid' => $recipient !== '' ? $recipient . '@s.whatsapp.net' : '',
             'message_status' => $mapped,
             'status' => $mapped,
-            'timestamp' => (int) ($status['timestamp'] ?? time()),
+            // A missing receipt timestamp is unknown; the persistence layer
+            // must not turn local processing time into a provider event time.
+            'timestamp' => isset($status['timestamp']) && is_numeric($status['timestamp'])
+                ? (int) $status['timestamp']
+                : null,
             'provider_name' => 'meta_cloud',
             'provider_payload_id' => $id,
             'meta_phone_number_id' => $phoneNumberId,
             'delivery_error' => mb_substr($error, 0, 1000),
+            'delivery_error_code' => $errorCode !== '' ? substr($errorCode, 0, 64) : null,
         ];
     }
 
     private function messageType(string $type): string
     {
-        return in_array($type, ['text','image','audio','video','document','sticker','reaction','location','contacts','interactive','button'], true)
-            ? ($type === 'contacts' ? 'contact' : (in_array($type, ['interactive','button'], true) ? 'text' : $type))
-            : 'text';
+        if ($type === 'order') return 'unsupported';
+        return in_array($type, ['text','image','audio','video','document','sticker','reaction','location','contacts','interactive','button','template'], true)
+            ? ($type === 'contacts' ? 'contact' : (in_array($type, ['interactive','button'], true) ? 'interactive' : $type))
+            : 'unsupported';
+    }
+
+    private function qualifiesCustomerMessage(string $type): bool
+    {
+        return in_array($type, ['text', 'image', 'audio', 'video', 'document', 'sticker', 'location', 'contacts', 'interactive', 'button', 'order'], true);
     }
 
     private function messageText(array $message, string $type): string
@@ -153,5 +183,98 @@ class Meta_webhook_normalizer
             return trim((string) ($contact['name']['formatted_name'] ?? 'Contato compartilhado'));
         }
         return '';
+    }
+
+    /** @return array<string,mixed> */
+    private function structuredContent(array $message, string $type): array
+    {
+        if ($type === 'text') return ['text' => trim((string) ($message['text']['body'] ?? ''))];
+
+        if (in_array($type, ['image', 'audio', 'video', 'document', 'sticker'], true)) {
+            $media = is_array($message[$type] ?? null) ? $message[$type] : [];
+            return [
+                'attachment' => [
+                    'kind' => $type,
+                    'provider_media_id' => trim((string) ($media['id'] ?? '')) ?: null,
+                    'mime_type' => trim((string) ($media['mime_type'] ?? '')) ?: null,
+                    'file_name' => trim((string) ($media['filename'] ?? '')) ?: null,
+                    'caption' => trim((string) ($media['caption'] ?? '')),
+                    'is_voice_note' => $type === 'audio' && (bool) ($media['voice'] ?? $media['ptt'] ?? false),
+                    'sha256' => trim((string) ($media['sha256'] ?? '')) ?: null,
+                ],
+            ];
+        }
+
+        if ($type === 'location') {
+            $location = is_array($message['location'] ?? null) ? $message['location'] : [];
+            return ['location' => [
+                'latitude' => $location['latitude'] ?? null,
+                'longitude' => $location['longitude'] ?? null,
+                'name' => trim((string) ($location['name'] ?? '')) ?: null,
+                'address' => trim((string) ($location['address'] ?? '')) ?: null,
+            ]];
+        }
+
+        if ($type === 'contacts') {
+            $items = [];
+            foreach ((array) ($message['contacts'] ?? []) as $contact) {
+                if (!is_array($contact)) continue;
+                $phones = [];
+                foreach ((array) ($contact['phones'] ?? []) as $phone) {
+                    if (is_array($phone)) $phone = $phone['phone'] ?? $phone['wa_id'] ?? '';
+                    if (is_scalar($phone) && trim((string) $phone) !== '') $phones[] = trim((string) $phone);
+                }
+                $emails = [];
+                foreach ((array) ($contact['emails'] ?? []) as $email) {
+                    if (is_array($email)) $email = $email['email'] ?? '';
+                    if (is_scalar($email) && trim((string) $email) !== '') $emails[] = trim((string) $email);
+                }
+                $items[] = [
+                    'display_name' => trim((string) ($contact['name']['formatted_name'] ?? '')) ?: null,
+                    'phones' => array_slice($phones, 0, 10),
+                    'emails' => array_slice($emails, 0, 10),
+                    'organization' => trim((string) ($contact['org']['company'] ?? '')) ?: null,
+                ];
+            }
+            return ['contact' => ['contacts' => array_slice($items, 0, 10)]];
+        }
+
+        if ($type === 'interactive' || $type === 'button') {
+            $interactive = $type === 'interactive' ? (array) ($message['interactive'] ?? []) : (array) ($message['button'] ?? []);
+            $reply = $interactive['button_reply'] ?? $interactive['list_reply'] ?? $interactive;
+            return ['interactive' => [
+                'kind' => $type === 'button' ? 'button' : (string) ($interactive['type'] ?? 'interactive'),
+                'id' => trim((string) ($reply['id'] ?? $interactive['payload'] ?? '')) ?: null,
+                'label' => trim((string) ($reply['title'] ?? $reply['text'] ?? $interactive['text'] ?? '')) ?: null,
+                'description' => trim((string) ($reply['description'] ?? '')) ?: null,
+                'context' => null,
+            ]];
+        }
+
+        if ($type === 'reaction') {
+            $reaction = (array) ($message['reaction'] ?? []);
+            return ['reaction' => [
+                'emoji' => trim((string) ($reaction['emoji'] ?? '')) ?: null,
+                'message_id' => trim((string) ($reaction['message_id'] ?? '')) ?: null,
+                'removed' => trim((string) ($reaction['emoji'] ?? '')) === '',
+            ]];
+        }
+
+        if ($type === 'template') {
+            $template = (array) ($message['template'] ?? []);
+            return ['template' => [
+                'name' => trim((string) ($template['name'] ?? '')) ?: null,
+                'language' => trim((string) ($template['language']['code'] ?? $template['language'] ?? '')) ?: null,
+                'category' => trim((string) ($template['category'] ?? '')) ?: null,
+                'header' => null,
+                'body' => null,
+                'footer' => null,
+                'resolved_parameters' => [],
+                'buttons' => [],
+                'media_reference' => null,
+            ]];
+        }
+
+        return [];
     }
 }

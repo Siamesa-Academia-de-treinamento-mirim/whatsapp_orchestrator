@@ -48,11 +48,10 @@ foreach (($conversations ?? []) as $conversation) {
                 <span class="impulso-count-badge"><?php echo count($channel_stats); ?></span>
             </div>
 
-            <div class="impulso-channel-list" role="tablist" aria-label="Filtrar conversas por canal">
+            <div class="impulso-channel-list" role="group" aria-label="Filtrar conversas por canal">
                 <button class="impulso-channel-item active"
                         type="button"
-                        role="tab"
-                        aria-selected="true"
+                        aria-pressed="true"
                         data-channel-filter="all"
                         data-channel-label="Todos os canais">
                     <span class="impulso-channel-icon all"><i data-feather="layers"></i></span>
@@ -66,8 +65,7 @@ foreach (($conversations ?? []) as $conversation) {
                 <?php foreach ($channel_stats as $channel) { ?>
                     <button class="impulso-channel-item"
                             type="button"
-                            role="tab"
-                            aria-selected="false"
+                            aria-pressed="false"
                             title="<?php echo esc($channel['name'] . ($channel['phone'] ? ' · ' . $channel['phone'] : '')); ?>"
                             data-channel-filter="<?php echo (int) $channel['id']; ?>"
                             data-channel-label="<?php echo esc($channel['name']); ?>">
@@ -116,16 +114,30 @@ foreach (($conversations ?? []) as $conversation) {
                     <i data-feather="search"></i>
                     <input type="search" id="impulso-conversation-search" placeholder="Buscar por nome, telefone ou mensagem">
                 </div>
+                <div class="impulso-workflow-filters" aria-label="Filtros operacionais">
+                    <select class="form-control" data-conversation-filter-control="assignee_id" aria-label="Filtrar por agente"><option value="">Todos os agentes</option><option value="unassigned">Sem agente</option><option value="me">Atribuídas a mim</option></select>
+                    <select class="form-control" data-conversation-filter-control="team_id" aria-label="Filtrar por equipe"><option value="">Todas as equipes</option></select>
+                    <select class="form-control" data-conversation-filter-control="priority" aria-label="Filtrar por prioridade"><option value="">Todas as prioridades</option><option value="none">Sem prioridade</option><option value="low">Baixa</option><option value="medium">Média</option><option value="high">Alta</option><option value="urgent">Urgente</option></select>
+                    <select class="form-control" data-conversation-filter-control="unread" aria-label="Filtrar leitura"><option value="">Lidas e não lidas</option><option value="1">Não lidas</option><option value="0">Lidas</option></select>
+                    <select class="form-control" data-conversation-filter-control="conversation_type" aria-label="Filtrar tipo"><option value="">Individuais e grupos</option><option value="individual">Individuais</option><option value="group">Grupos</option></select>
+                    <select class="form-control" data-conversation-filter-control="bot_status" aria-label="Filtrar bot"><option value="">Todos os bots</option><option value="running">Bot ativo</option><option value="paused">Bot pausado</option><option value="handoff">Handoff humano</option></select>
+                    <input class="form-control" data-conversation-filter-control="last_activity_from" type="date" aria-label="Atividade desde">
+                    <input class="form-control" data-conversation-filter-control="last_activity_to" type="date" aria-label="Atividade até">
+                    <input class="form-control" data-conversation-filter-control="tags" type="search" placeholder="Tags (separadas por vírgula)" aria-label="Filtrar tags">
+                </div>
+                <div class="impulso-active-filter-row"><div id="impulso-active-filter-summary" aria-live="polite"></div><button type="button" class="btn btn-link btn-sm impulso-hidden" data-conversation-filter-clear>Limpar filtros</button></div>
             </div>
-            <div class="impulso-queue-tabs" role="tablist">
-                <button class="impulso-queue-tab active" type="button" data-conversation-filter="all">Todas</button>
-                <button class="impulso-queue-tab" type="button" data-conversation-filter="open">Abertas</button>
-                <button class="impulso-queue-tab" type="button" data-conversation-filter="pending">Pendentes</button>
-                <button class="impulso-queue-tab" type="button" data-conversation-filter="unassigned">Sem agente</button>
+            <div class="impulso-queue-tabs" role="group" aria-label="Filtrar conversas por status">
+                <button class="impulso-queue-tab active" type="button" aria-pressed="true" data-conversation-filter="all">Todas</button>
+                <button class="impulso-queue-tab" type="button" aria-pressed="false" data-conversation-filter="open">Abertas <span data-filter-count="open"></span></button>
+                <button class="impulso-queue-tab" type="button" aria-pressed="false" data-conversation-filter="pending">Pendentes <span data-filter-count="pending"></span></button>
+                <button class="impulso-queue-tab" type="button" aria-pressed="false" data-conversation-filter="snoozed">Adiadas <span data-filter-count="snoozed"></span></button>
+                <button class="impulso-queue-tab" type="button" aria-pressed="false" data-conversation-filter="resolved">Resolvidas <span data-filter-count="resolved"></span></button>
+                <button class="impulso-queue-tab" type="button" aria-pressed="false" data-conversation-filter="unassigned">Sem agente</button>
             </div>
             <div class="impulso-conversation-list" id="impulso-conversation-list">
                 <?php foreach ($conversations as $index => $conversation) { ?>
-                <button class="impulso-conversation-item <?php echo $index === 0 ? 'active' : ''; ?>"
+                <button class="impulso-conversation-item <?php echo $index === 0 ? 'active ' : ''; ?><?php echo ((int) ($conversation['unread'] ?? 0) > 0) ? 'unread' : ''; ?>"
                         type="button"
                         data-conversation-id="<?php echo (int) $conversation['id']; ?>"
                         data-status="<?php echo esc($conversation['status']); ?>"
@@ -160,7 +172,7 @@ foreach (($conversations ?? []) as $conversation) {
         <section class="impulso-chat-column impulso-chat-main">
             <header class="impulso-chat-header">
                 <div class="impulso-chat-header-main">
-                    <button class="impulso-icon-button btn btn-default d-lg-none" type="button" data-impulso-action="open-conversation-list"><i data-feather="menu"></i></button>
+                    <button class="impulso-icon-button btn btn-default impulso-open-conversation-list" type="button" data-impulso-action="open-conversation-list"><i data-feather="menu"></i></button>
                     <div class="impulso-avatar" id="impulso-active-avatar"><?php echo esc($selected['avatar'] ?? '—'); ?></div>
                     <div class="impulso-chat-header-copy">
                         <h3 id="impulso-active-name"><?php echo esc($selected['name'] ?? 'Selecione uma conversa'); ?></h3>
@@ -200,6 +212,8 @@ foreach (($conversations ?? []) as $conversation) {
                     <div class="impulso-empty"><div class="impulso-empty-icon"><i data-feather="message-square"></i></div><h4>Carregando histórico</h4><p>As mensagens serão consultadas pela integração.</p></div>
                 <?php } ?>
             </div>
+            <div class="impulso-context-menu impulso-hidden" id="impulso-message-context-menu" role="menu" aria-label="Ações da mensagem"></div>
+            <div class="impulso-context-menu impulso-hidden" id="impulso-conversation-context-menu" role="menu" aria-label="Ações da conversa"></div>
 
             <div class="impulso-composer">
                 <div class="impulso-composer-mode">
@@ -210,16 +224,20 @@ foreach (($conversations ?? []) as $conversation) {
                 <div class="impulso-composer-box">
                     <div class="impulso-composer-tools">
                         <button class="impulso-tool-button" type="button" data-impulso-action="attach" title="Enviar imagem, áudio ou documento"><i data-feather="paperclip"></i></button>
-                        <button class="impulso-tool-button" type="button" data-impulso-action="emoji" title="Emoji"><i data-feather="smile"></i></button>
-                        <button class="impulso-tool-button" type="button" data-impulso-action="quick-replies" title="Respostas rápidas"><i data-feather="zap"></i></button>
+                        <button class="impulso-tool-button impulso-hidden" type="button" data-impulso-action="templates" id="impulso-template-button" title="Enviar template aprovado" aria-label="Enviar template aprovado" aria-expanded="false" aria-controls="impulso-template-picker"><i data-feather="file-text"></i></button>
+                        <button class="impulso-tool-button" type="button" data-impulso-action="emoji" title="Emoji" aria-label="Abrir seletor de emoji" aria-expanded="false" aria-controls="impulso-emoji-picker"><i data-feather="smile"></i></button>
+                        <button class="impulso-tool-button" type="button" data-impulso-action="quick-replies" title="Respostas rápidas" aria-label="Abrir respostas rápidas" aria-expanded="false" aria-controls="impulso-quick-replies"><i data-feather="zap"></i></button>
                     </div>
                     <textarea id="impulso-message-input" rows="1" placeholder="Digite uma mensagem…"></textarea>
                     <button class="impulso-tool-button" type="button" data-impulso-action="voice" id="impulso-voice-button" title="Gravar áudio"><i data-feather="mic"></i></button>
                     <button class="impulso-send-button" type="button" id="impulso-send-message" title="Enviar"><i data-feather="send"></i></button>
                 </div>
-                <input id="impulso-attachment-input" type="file" hidden accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.txt">
+                <input id="impulso-attachment-input" type="file" multiple hidden accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt">
+                <div id="impulso-drop-affordance" class="impulso-drop-affordance impulso-hidden" role="status" aria-live="polite"><i data-feather="upload-cloud"></i><span>Solte os arquivos aqui</span></div>
+                <div id="impulso-service-window" class="impulso-composer-hint impulso-hidden" role="status" aria-live="polite"></div>
                 <div class="impulso-composer-popover impulso-hidden" id="impulso-emoji-picker" aria-label="Seletor de emojis"></div>
                 <div class="impulso-composer-popover impulso-hidden" id="impulso-quick-replies" aria-label="Respostas rápidas"></div>
+                <div class="impulso-composer-popover impulso-hidden" id="impulso-template-picker" aria-label="Templates oficiais"></div>
                 <div class="impulso-attachment-preview impulso-hidden" id="impulso-attachment-preview"></div>
                 <div class="impulso-composer-hint" id="impulso-composer-hint">Enter para enviar · Shift + Enter para quebrar linha</div>
             </div>
@@ -260,9 +278,34 @@ foreach (($conversations ?? []) as $conversation) {
                 </div>
             </div>
 
+            <div class="impulso-contact-section">
+                <div class="impulso-contact-section-title"><span>Fluxo da conversa</span><button class="btn btn-default btn-sm" type="button" id="impulso-snooze-button">Adiar</button></div>
+                <div class="impulso-workflow-controls">
+                    <label>Status<select class="form-control impulso-select-small" id="impulso-conversation-status"><option value="open">Aberta</option><option value="pending">Pendente</option><option value="resolved">Resolvida</option><option value="snoozed">Adiada</option></select></label>
+                    <label>Prioridade<select class="form-control impulso-select-small" id="impulso-conversation-priority"><option value="none">Sem prioridade</option><option value="low">Baixa</option><option value="medium">Média</option><option value="high">Alta</option><option value="urgent">Urgente</option></select></label>
+                </div>
+                <select class="impulso-select-small" id="impulso-team-select"><option value="">Sem equipe</option></select>
+                <small id="impulso-conversation-snooze">Sem snooze ativo</small>
+                <div id="impulso-custom-snooze" class="impulso-custom-snooze impulso-hidden" role="dialog" aria-label="Escolher data e hora do snooze">
+                    <label for="impulso-custom-snooze-input">Data e hora</label>
+                    <input id="impulso-custom-snooze-input" type="datetime-local" class="form-control">
+                    <div class="impulso-custom-snooze-actions"><button type="button" class="btn btn-link btn-sm" id="impulso-custom-snooze-cancel">Cancelar</button><button type="button" class="btn btn-primary btn-sm" id="impulso-custom-snooze-apply">Aplicar</button></div>
+                </div>
+            </div>
+
             <div class="impulso-contact-section impulso-hidden" id="impulso-group-section">
                 <div class="impulso-contact-section-title"><span>Participantes do grupo</span><span class="impulso-badge" id="impulso-group-participant-count">0</span></div>
                 <div id="impulso-group-participants"><small>Os participantes serão identificados conforme enviarem mensagens.</small></div>
+            </div>
+
+            <div class="impulso-contact-section">
+                <div class="impulso-contact-section-title"><span>Conversas anteriores</span></div>
+                <div id="impulso-previous-conversations"><small>Selecione uma conversa.</small></div>
+            </div>
+
+            <div class="impulso-contact-section">
+                <div class="impulso-contact-section-title"><span>Atividade</span><button class="btn btn-default btn-sm" type="button" id="impulso-mark-unread">Não lida</button></div>
+                <div id="impulso-conversation-activity"><small>Selecione uma conversa.</small></div>
             </div>
 
             <div class="impulso-contact-section">

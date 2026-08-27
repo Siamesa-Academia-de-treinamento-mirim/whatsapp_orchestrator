@@ -54,18 +54,20 @@ class Meta_cloud_client
     }
 
     /** @return array<string,mixed> */
-    public function sendText(string $recipient, string $text): array
+    public function sendText(string $recipient, string $text, array $context = []): array
     {
         $recipient = $this->normalizeRecipient($recipient);
         $text = trim($text);
         if ($recipient === '' || $text === '') throw new InvalidArgumentException('Destinatario e texto sao obrigatorios.');
-        return $this->messageRequest([
+        $payload = [
             'messaging_product' => 'whatsapp',
             'recipient_type' => 'individual',
             'to' => $recipient,
             'type' => 'text',
             'text' => ['preview_url' => false, 'body' => mb_substr($text, 0, 4096)],
-        ]);
+        ];
+        $this->appendReplyContext($payload, $context);
+        return $this->messageRequest($payload);
     }
 
     /** @return array<string,mixed> */
@@ -76,7 +78,7 @@ class Meta_cloud_client
         $languageCode = trim($languageCode);
         if ($recipient === '' || $templateName === '' || $languageCode === '') throw new InvalidArgumentException('Destinatario, template e idioma sao obrigatorios.');
         $template = ['name' => $templateName, 'language' => ['code' => $languageCode]];
-        if ($components) $template['components'] = array_values($components);
+        if ($components) $template['components'] = $this->sanitizeTemplateComponents($components);
         return $this->messageRequest([
             'messaging_product' => 'whatsapp',
             'recipient_type' => 'individual',
@@ -87,7 +89,7 @@ class Meta_cloud_client
     }
 
     /** @return array<string,mixed> */
-    public function sendMedia(string $recipient, array $media): array
+    public function sendMedia(string $recipient, array $media, array $context = []): array
     {
         $recipient = $this->normalizeRecipient($recipient);
         $type = strtolower(trim((string) ($media['type'] ?? '')));
@@ -96,25 +98,56 @@ class Meta_cloud_client
         if (!empty($media['id'])) $node['id'] = trim((string) $media['id']);
         elseif (!empty($media['link'])) $node['link'] = trim((string) $media['link']);
         else throw new InvalidArgumentException('A midia precisa de id ou link HTTPS.');
+        if ($type === 'audio' && !empty($media['voice_note'])) $node['voice'] = true;
         if (!empty($media['caption']) && $type !== 'audio') $node['caption'] = mb_substr(trim((string) $media['caption']), 0, 1024);
         if (!empty($media['filename']) && $type === 'document') $node['filename'] = mb_substr(trim((string) $media['filename']), 0, 255);
-        return $this->messageRequest([
+        $payload = [
             'messaging_product' => 'whatsapp',
             'recipient_type' => 'individual',
             'to' => $recipient,
             'type' => $type,
             $type => $node,
+        ];
+        $this->appendReplyContext($payload, $context);
+        return $this->messageRequest($payload);
+    }
+
+    /** @return array<string,mixed> */
+    public function sendReaction(string $recipient, string $messageId, string $emoji, array $context = []): array
+    {
+        $recipient = $this->normalizeRecipient($recipient);
+        $messageId = trim($messageId);
+        $emoji = trim($emoji);
+        if ($recipient === '' || $messageId === '' || mb_strlen($emoji) > 16) throw new InvalidArgumentException('Destinatario, mensagem alvo e emoji sao obrigatorios ou validos.');
+        return $this->messageRequest([
+            'messaging_product' => 'whatsapp',
+            'recipient_type' => 'individual',
+            'to' => $recipient,
+            'type' => 'reaction',
+            'reaction' => ['message_id' => $messageId, 'emoji' => $emoji],
         ]);
     }
 
     /** @return array<string,mixed> */
     public function listTemplates(int $limit = 250): array
     {
+        return $this->listTemplatesPage($limit, null);
+    }
+
+    /** @return array<string,mixed> */
+    public function listTemplatesPage(int $limit = 250, ?string $after = null): array
+    {
         if ($this->wabaId === '') throw new RuntimeException('WABA ID nao configurado.');
-        return $this->request('GET', '/' . rawurlencode($this->wabaId) . '/message_templates', null, [
+        $query = [
             'limit' => min(250, max(1, $limit)),
             'fields' => 'id,name,status,category,language,components,quality_score,rejected_reason',
-        ]);
+        ];
+        if ($after !== null && preg_match('/^[A-Za-z0-9._:=-]{1,512}$/', $after)) {
+            $query['after'] = $after;
+        } elseif ($after !== null) {
+            throw new InvalidArgumentException('Cursor de templates Meta invalido.');
+        }
+        return $this->request('GET', '/' . rawurlencode($this->wabaId) . '/message_templates', null, $query);
     }
 
     public function verifySignature(string $rawBody, ?string $signatureHeader): bool
@@ -134,6 +167,58 @@ class Meta_cloud_client
             $response['message_id'] = (string) ($response['data']['messages'][0]['id'] ?? '');
         }
         return $response;
+    }
+
+    /**
+     * Keep local media/history metadata outside the Meta transport boundary.
+     * The Cloud API accepts only the documented component and parameter keys.
+     *
+     * @param array<int,mixed> $components
+     * @return array<int,array<string,mixed>>
+     */
+    private function sanitizeTemplateComponents(array $components): array
+    {
+        $result = [];
+        foreach ($components as $component) {
+            if (!is_array($component)) throw new InvalidArgumentException('Componente de template Meta invalido.');
+            $type = strtolower(trim((string) ($component['type'] ?? '')));
+            if (!in_array($type, ['header', 'body', 'button'], true)) throw new InvalidArgumentException('Tipo de componente de template Meta nao suportado.');
+            if (!is_array($component['parameters'] ?? null)) throw new InvalidArgumentException('Parametros de template Meta invalidos.');
+
+            $clean = ['type' => $type];
+            if ($type === 'button') {
+                $subType = strtolower(trim((string) ($component['sub_type'] ?? '')));
+                $index = (string) ($component['index'] ?? '');
+                if ($subType !== '') $clean['sub_type'] = $subType;
+                if ($index !== '' && preg_match('/^\d{1,3}$/', $index)) $clean['index'] = $index;
+                elseif ($index !== '') throw new InvalidArgumentException('Indice de botao Meta invalido.');
+            }
+            $parameters = [];
+            foreach ($component['parameters'] as $parameter) {
+                if (!is_array($parameter)) throw new InvalidArgumentException('Parametro de template Meta invalido.');
+                $parameterType = strtolower(trim((string) ($parameter['type'] ?? '')));
+                if ($parameterType === 'text') {
+                    if (!array_key_exists('text', $parameter) || !is_scalar($parameter['text'])) throw new InvalidArgumentException('Texto de parametro Meta invalido.');
+                    $parameters[] = ['type' => 'text', 'text' => (string) $parameter['text']];
+                    continue;
+                }
+                if (!in_array($parameterType, ['image', 'video', 'document'], true)) throw new InvalidArgumentException('Tipo de parametro Meta nao suportado.');
+                $node = is_array($parameter[$parameterType] ?? null) ? $parameter[$parameterType] : [];
+                $link = trim((string) ($node['link'] ?? ''));
+                $id = trim((string) ($node['id'] ?? ''));
+                if (($link === '') === ($id === '')) throw new InvalidArgumentException('A midia de template Meta precisa de link ou id.');
+                if ($link !== '') {
+                    if (!str_starts_with(strtolower($link), 'https://') || filter_var($link, FILTER_VALIDATE_URL) === false) throw new InvalidArgumentException('O link de midia do template Meta precisa ser HTTPS valido.');
+                    $parameters[] = ['type' => $parameterType, $parameterType => ['link' => $link]];
+                } else {
+                    if (!preg_match('/^[A-Za-z0-9._:-]{1,512}$/', $id)) throw new InvalidArgumentException('O id de midia do template Meta e invalido.');
+                    $parameters[] = ['type' => $parameterType, $parameterType => ['id' => $id]];
+                }
+            }
+            $clean['parameters'] = $parameters;
+            $result[] = $clean;
+        }
+        return $result;
     }
 
     /** @return array<string,mixed> */
@@ -165,6 +250,8 @@ class Meta_cloud_client
             'status_code' => $status,
             'data' => $this->sanitizer->redact($decoded, [$this->accessToken, $this->appSecret]),
             'error' => $error,
+            'error_code' => $success ? null : ($decoded['error']['code'] ?? null),
+            'error_type' => $success ? null : ($decoded['error']['type'] ?? null),
         ];
     }
 
@@ -201,9 +288,18 @@ class Meta_cloud_client
         return preg_replace('/\D+/', '', $recipient) ?: '';
     }
 
+    /** @param array<string,mixed> $payload @param array<string,mixed> $context */
+    private function appendReplyContext(array &$payload, array $context): void
+    {
+        $externalId = trim((string) ($context['reply_to_external_message_id'] ?? ''));
+        if ($externalId !== '') {
+            $payload['context'] = ['message_id' => $externalId];
+        }
+    }
+
     /** @return array<string,mixed> */
     private function failure(int $status, string $error): array
     {
-        return ['success' => false, 'status_code' => $status, 'data' => [], 'error' => $error, 'message_id' => ''];
+        return ['success' => false, 'status_code' => $status, 'data' => [], 'error' => $error, 'error_code' => null, 'message_id' => ''];
     }
 }

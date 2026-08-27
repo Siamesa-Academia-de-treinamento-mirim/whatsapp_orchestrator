@@ -6,7 +6,6 @@ namespace Chatwoot_plugin\Controllers;
 
 use App\Controllers\Security_Controller;
 use Chatwoot_plugin\Libraries\Chat_permissions;
-use Chatwoot_plugin\Libraries\Migration_runner;
 use Chatwoot_plugin\Services\Chat_service;
 use Chatwoot_plugin\Services\Contact_service;
 use Chatwoot_plugin\Services\Campaign_service;
@@ -27,9 +26,6 @@ class Chatwoot extends Security_Controller
             app_redirect('forbidden');
         }
 
-        // Also covers upgrades where the plugin was already active before the
-        // new lifecycle hook was introduced. Version checks are idempotent.
-        (new Migration_runner())->migrate();
         $this->chat = new Chat_service();
     }
 
@@ -161,11 +157,14 @@ class Chatwoot extends Security_Controller
             'can_manage_settings' => $canManageSettings,
             'integration_error' => $integrationError,
             'app_config' => [
+                'actorId' => (int) $this->login_user->id,
+                'actorName' => (string) ($this->login_user->first_name ?? $this->login_user->name ?? ''),
                 'endpoints' => [
                     'page' => get_uri('chatwoot_plugin'),
                     'instances' => get_uri('chatwoot_plugin/api/instances'),
                     'instancesRefresh' => get_uri('chatwoot_plugin/api/instances/refresh-status'),
                     'conversations' => get_uri('chatwoot_plugin/api/conversations'),
+                    'conversationAssignmentOptions' => get_uri('chatwoot_plugin/api/conversations/assignment-options'),
                     'contacts' => get_uri('chatwoot_plugin/api/contacts'),
                     'contactRepairs' => get_uri('chatwoot_plugin/api/contact-repairs'),
                     'campaigns' => get_uri('chatwoot_plugin/api/campaigns'),
@@ -176,6 +175,8 @@ class Chatwoot extends Security_Controller
                     'search' => get_uri('chatwoot_plugin/api/search'),
                     'mediaUpload' => get_uri('chatwoot_plugin/api/media'),
                     'notificationsReadAll' => get_uri('chatwoot_plugin/api/notifications/read-all'),
+                    'savedViews' => get_uri('chatwoot_plugin/api/saved-views'),
+                    'bulkAction' => get_uri('chatwoot_plugin/api/conversations/bulk-action'),
                     'settings' => get_uri('chatwoot_plugin/api/settings'),
                     'settingsTest' => get_uri('chatwoot_plugin/api/settings/test'),
                     'csrf' => get_uri('chatwoot_plugin/api/session/csrf'),
@@ -184,7 +185,12 @@ class Chatwoot extends Security_Controller
                 'csrfTokenName' => csrf_token(),
                 'csrfHash' => csrf_hash(),
                 'pollingIntervalMs' => (int) ($allPublicSettings['polling_interval_ms'] ?? 5000),
+                'localPollingIntervalMs' => max(3000, min(5000, (int) ($allPublicSettings['polling_interval_ms'] ?? 5000))),
                 'remoteSyncIntervalMs' => max(30000, (int) ($allPublicSettings['polling_interval_ms'] ?? 5000) * 6),
+                'readTimeoutMs' => 10000,
+                'remoteSyncTimeoutMs' => 10000,
+                'instanceRefreshIntervalMs' => 60000,
+                'writeTimeoutMs' => max(5000, min(120000, (int) ($allPublicSettings['request_timeout_seconds'] ?? 30) * 1000)),
                 'conversationPageSize' => (int) ($allPublicSettings['conversation_page_size'] ?? 30),
                 'messagePageSize' => 50,
                 'remoteConversationSyncLimit' => 100,
@@ -223,12 +229,12 @@ class Chatwoot extends Security_Controller
             'last_message' => (string) ($row['last_message_preview'] ?? ''),
             'time' => $lastActivity ? date('H:i', strtotime((string) $lastActivity)) : '',
             'last_activity_at' => $lastActivity,
-            'assignee' => 'Nao atribuido',
-            'team' => 'Atendimento',
+            'assignee' => (string) ($row['assignee'] ?? ''),
+            'team' => is_array($row['team'] ?? null) ? (string) ($row['team']['name'] ?? '') : (string) ($row['team'] ?? ''),
             'email' => '',
             'city' => '',
             'source' => 'WhatsApp',
-            'tags' => [],
+            'tags' => is_array($row['tags'] ?? null) ? $row['tags'] : [],
             'messages' => [],
         ]);
     }

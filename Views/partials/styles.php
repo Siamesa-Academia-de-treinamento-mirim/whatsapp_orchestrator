@@ -191,6 +191,8 @@
     .impulso-workspace {
         background: transparent;
         min-height: calc(100vh - 216px);
+        container-name: impulso-inbox;
+        container-type: inline-size;
     }
 
     .impulso-page {
@@ -550,9 +552,12 @@
 
     .impulso-chat-layout {
         display: grid;
-        grid-template-columns: 330px minmax(430px, 1fr) 300px;
-        height: calc(100vh - 216px);
-        min-height: 650px;
+        grid-template-columns: minmax(0, 205px) minmax(0, 315px) minmax(0, 1fr) minmax(0, 300px);
+        height: 100%;
+        min-height: 0;
+        min-width: 0;
+        overflow: hidden;
+        width: 100%;
     }
 
     .impulso-chat-column {
@@ -570,6 +575,7 @@
     .impulso-chat-main {
         display: flex;
         flex-direction: column;
+        min-width: 0;
     }
 
     .impulso-contact-sidebar {
@@ -1762,7 +1768,6 @@
 
     @media (max-width: 1280px) {
         .impulso-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .impulso-chat-layout { grid-template-columns: 300px minmax(400px, 1fr); }
         .impulso-contact-sidebar {
             bottom: 0;
             box-shadow: -14px 0 35px rgba(31, 41, 55, .12);
@@ -1790,7 +1795,7 @@
         .impulso-automation-flow > :last-child { grid-column: 1 / -1; justify-self: end; }
     }
 
-    @media (max-width: 840px) {
+    @media (max-width: 991.98px) {
         .impulso-topbar { padding: 12px 14px; }
         .impulso-brand-block .impulso-live-pill { display: none; }
         .impulso-topbar-actions .impulso-icon-button { display: none; }
@@ -1802,7 +1807,7 @@
         .impulso-section-heading { align-items: flex-start; flex-direction: column; }
         .impulso-section-actions { width: 100%; }
         .impulso-section-actions .btn { flex: 1; }
-        .impulso-chat-layout { grid-template-columns: 1fr; height: calc(100vh - 270px); min-height: 580px; }
+        .impulso-chat-layout { grid-template-columns: 1fr; height: 100%; min-height: 0; }
         .impulso-chat-sidebar {
             bottom: 0;
             box-shadow: 14px 0 35px rgba(31, 41, 55, .12);
@@ -1867,7 +1872,7 @@
 
     /* Multi-instance channel rail */
     .impulso-chat-layout {
-        grid-template-columns: 205px 315px minmax(420px, 1fr) 300px;
+        grid-template-columns: minmax(0, 205px) minmax(0, 315px) minmax(0, 1fr) minmax(0, 300px);
     }
 
     .impulso-channel-sidebar {
@@ -2095,7 +2100,7 @@
 
     @media (max-width: 1480px) {
         .impulso-chat-layout {
-            grid-template-columns: 190px 300px minmax(400px, 1fr);
+            grid-template-columns: minmax(0, 190px) minmax(0, 300px) minmax(0, 1fr);
         }
 
         .impulso-contact-sidebar {
@@ -2115,7 +2120,7 @@
 
     @media (max-width: 1100px) {
         .impulso-chat-layout {
-            grid-template-columns: 68px 290px minmax(380px, 1fr);
+            grid-template-columns: minmax(0, 68px) minmax(0, 290px) minmax(0, 1fr);
         }
 
         .impulso-channel-header {
@@ -2137,7 +2142,7 @@
         .impulso-channel-manage { justify-content: center; padding: 10px; }
     }
 
-    @media (max-width: 840px) {
+    @media (max-width: 991.98px) {
         .impulso-chat-layout {
             grid-template-columns: 1fr;
         }
@@ -2149,6 +2154,61 @@
         .impulso-mobile-channel-picker {
             display: block;
         }
+    }
+
+    /* Container-query companion: the Rise sidebar reduces inline space without changing the viewport. */
+    @container impulso-inbox (max-width: 1480px) {
+        .impulso-chat-layout { grid-template-columns: minmax(0, 190px) minmax(0, 300px) minmax(0, 1fr); }
+        .impulso-contact-sidebar {
+            bottom: 0;
+            max-width: 330px;
+            position: fixed;
+            right: -360px;
+            top: 0;
+            transition: right .2s ease;
+            width: 90%;
+            z-index: 1050;
+        }
+        .impulso-contact-sidebar.open { right: 0; }
+    }
+
+    @container impulso-inbox (max-width: 1100px) {
+        .impulso-chat-layout { grid-template-columns: minmax(0, 68px) minmax(0, 290px) minmax(0, 1fr); }
+        .impulso-channel-header { justify-content: center; padding: 12px 6px; }
+        .impulso-channel-header > div,
+        .impulso-channel-header .impulso-count-badge,
+        .impulso-channel-copy,
+        .impulso-channel-unread,
+        .impulso-channel-manage span { display: none; }
+        .impulso-channel-list { padding: 7px; }
+        .impulso-channel-item { justify-content: center; padding: 7px; }
+    }
+
+    @container impulso-inbox (max-width: 991.98px) {
+        .impulso-chat-layout { grid-template-columns: 1fr; }
+        .impulso-channel-sidebar { display: none; }
+        .impulso-mobile-channel-picker { display: block; }
+        .impulso-chat-sidebar {
+            bottom: 0;
+            left: -105%;
+            max-width: 360px;
+            position: fixed;
+            top: 0;
+            transition: left .2s ease;
+            width: 92%;
+            z-index: 1050;
+        }
+        .impulso-chat-sidebar.open { left: 0; }
+        .impulso-open-conversation-list { display: inline-flex; }
+        .impulso-composer-box {
+            align-items: end;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 34px 34px;
+        }
+        .impulso-composer-box textarea { grid-column: 1; grid-row: 1; min-width: 0; width: 100%; }
+        .impulso-composer-tools { display: flex; flex-wrap: wrap; grid-column: 1 / -1; grid-row: 2; min-width: 0; width: 100%; }
+        .impulso-composer-box > .impulso-tool-button { grid-column: 2; grid-row: 1; }
+        .impulso-composer-box > .impulso-send-button { grid-column: 3; grid-row: 1; }
     }
 
 
@@ -2443,9 +2503,23 @@
     .impulso-hub .impulso-attachment-preview-copy strong,
     .impulso-hub .impulso-attachment-preview-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .impulso-hub .impulso-attachment-preview-copy span { font-size: 10px; opacity: .65; }
+    .impulso-hub .impulso-recording-preview { align-items: center; display: flex; gap: 8px; padding: 6px 8px; }
+    .impulso-hub .impulso-recording-preview canvas { background: rgba(31,147,255,.06); border-radius: 5px; height: 42px; max-width: 320px; width: 42%; }
+    .impulso-hub .impulso-recording-preview small { opacity: .65; }
+    .impulso-hub .impulso-attachment-error { color: var(--ih-danger); display: block; }
     .impulso-hub .impulso-tool-button.is-recording { animation: impulsoPulse 1s infinite; background: rgba(221,75,93,.13); color: var(--ih-danger); }
     .impulso-hub .impulso-composer[data-mode="note"] .impulso-composer-box { background: rgba(229,154,34,.08); border-color: rgba(229,154,34,.35); }
     .impulso-hub .impulso-composer[data-mode="note"] .impulso-send-button { background: var(--ih-warning); }
+    .impulso-hub .impulso-reply-strip { align-items: center; background: var(--ih-surface-soft); border: 1px solid var(--ih-border); border-radius: 8px; display: flex; gap: 8px; margin: 8px 0; padding: 7px 9px; }
+    .impulso-hub .impulso-reply-strip-icon { color: var(--ih-primary); }
+    .impulso-hub .impulso-reply-strip-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+    .impulso-hub .impulso-reply-strip-copy strong,
+    .impulso-hub .impulso-reply-strip-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .impulso-hub .impulso-reply-strip-copy span { font-size: 11px; opacity: .72; }
+    .impulso-hub .impulso-composer-box.is-dragging { border-color: var(--ih-primary); box-shadow: 0 0 0 3px rgba(31, 147, 255, .16); }
+    .impulso-hub .impulso-drop-affordance { align-items: center; background: var(--ih-surface-soft); border: 1px dashed var(--ih-primary); border-radius: 7px; color: var(--ih-primary); display: flex; gap: 7px; justify-content: center; margin: 6px 0; padding: 7px 10px; }
+    .impulso-hub .impulso-quick-reply-list button.is-highlighted { border-color: var(--ih-primary); background: var(--ih-surface-soft); }
+    .impulso-hub .impulso-composer button:disabled { cursor: not-allowed; opacity: .45; }
     .impulso-hub .impulso-ai-runtime { align-items: center; display: flex; gap: 7px; margin-bottom: 8px; }
     .impulso-hub .impulso-ai-runtime .impulso-status-dot { background: var(--ih-muted); border-radius: 50%; height: 8px; width: 8px; }
     .impulso-hub .impulso-ai-runtime.is-running .impulso-status-dot { background: var(--ih-success); }
@@ -2580,21 +2654,83 @@
     .impulso-hub .impulso-message-row.internal .impulso-message { background: var(--ih-warning-soft, #fff7d6); border: 1px dashed var(--ih-warning, #d99b00); color: var(--ih-text); max-width: 82%; }
     .impulso-hub .impulso-message-row.internal .impulso-message::before { content: "Nota interna"; display: block; font-size: 9px; font-weight: 700; letter-spacing: .08em; margin-bottom: 5px; text-transform: uppercase; }
     .impulso-hub .impulso-message-video { border-radius: 9px; display: block; max-height: 360px; max-width: 100%; }
+    .impulso-hub .impulso-message { position: relative; }
+    .impulso-hub .impulso-message-menu-trigger { background: transparent; border: 0; color: inherit; cursor: pointer; opacity: .48; padding: 3px; position: absolute; right: 5px; top: 5px; }
+    .impulso-hub .impulso-message-menu-trigger:hover,
+    .impulso-hub .impulso-message-menu-trigger:focus-visible { opacity: 1; }
+    .impulso-hub .impulso-message-menu-trigger svg { height: 14px; width: 14px; }
+    .impulso-hub .impulso-message-reply-quote { align-items: center; background: rgba(127,127,127,.08); border: 0; border-left: 3px solid var(--ih-primary); border-radius: 6px; color: inherit; cursor: pointer; display: flex; gap: 7px; margin: 0 0 7px; max-width: 100%; padding: 6px 8px; text-align: left; width: 100%; }
+    .impulso-hub .impulso-message-reply-quote span { display: block; min-width: 0; }
+    .impulso-hub .impulso-message-reply-quote strong,
+    .impulso-hub .impulso-message-reply-quote small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .impulso-hub .impulso-message-reply-quote small { font-size: 10px; opacity: .68; }
+    .impulso-hub .impulso-message-reply-quote svg { height: 14px; width: 14px; }
+    .impulso-hub .impulso-message.is-highlighted { box-shadow: 0 0 0 2px var(--ih-warning); }
+    .impulso-hub .impulso-message-gallery { display: grid; gap: 5px; grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: min(360px, 100%); }
+    .impulso-hub .impulso-message-gallery .impulso-media-button { min-width: 0; }
+    .impulso-hub .impulso-message-gallery .impulso-message-image { aspect-ratio: 1; object-fit: cover; }
+    .impulso-hub .impulso-message-caption { margin-top: 7px; }
+    .impulso-hub .impulso-message-status { align-items: center; display: inline-flex; margin-left: 3px; }
+    .impulso-hub .impulso-message-status svg { height: 12px; width: 12px; }
+    .impulso-hub .impulso-message-status.status-delivered svg + svg,
+    .impulso-hub .impulso-message-status.status-read svg + svg { margin-left: -6px; }
+    .impulso-hub .impulso-message-status.status-read { font-weight: 700; }
+    .impulso-hub .impulso-message-reaction { align-items: center; background: var(--ih-surface-soft); border: 1px solid var(--ih-border); border-radius: 999px; display: inline-flex; font-size: 13px; gap: 3px; margin: 5px 3px 0 0; padding: 2px 6px; }
+    .impulso-hub .impulso-message-reaction.is-reacted { border-color: var(--ih-primary); box-shadow: 0 0 0 1px rgba(37,99,235,.16); }
+    .impulso-hub .impulso-message-reaction small { font-size: 9px; }
+    .impulso-reaction-picker { background: var(--ih-surface); border: 1px solid var(--ih-border); border-radius: 12px; box-shadow: 0 12px 30px rgba(0,0,0,.18); padding: 5px; position: fixed; z-index: 1090; }
+    .impulso-reaction-options { display: flex; gap: 2px; }
+    .impulso-reaction-options button { align-items: center; background: transparent; border: 0; border-radius: 8px; cursor: pointer; display: inline-flex; font-size: 20px; height: 34px; justify-content: center; width: 34px; }
+    .impulso-reaction-options button:hover, .impulso-reaction-options button:focus-visible { background: var(--ih-surface-soft); outline: 2px solid var(--ih-primary); outline-offset: -2px; }
+    .impulso-reaction-options .impulso-reaction-remove { color: var(--ih-danger); font-size: 24px; }
+    .impulso-hub .impulso-video-message { display: grid; gap: 6px; }
+    .impulso-hub .impulso-video-message video { display: block; max-height: 360px; max-width: 100%; }
+    .impulso-hub .impulso-media-open-button { align-items: center; background: transparent; border: 1px solid var(--ih-border); border-radius: 7px; color: inherit; cursor: pointer; display: inline-flex; gap: 5px; justify-content: center; padding: 5px 8px; text-decoration: none; width: max-content; }
+    .impulso-hub .impulso-structured-card,
+    .impulso-hub .impulso-unsupported-content { align-items: flex-start; background: rgba(127,127,127,.08); border: 1px solid var(--ih-border); border-radius: 9px; display: flex; gap: 9px; padding: 10px; }
+    .impulso-hub .impulso-structured-card > span,
+    .impulso-hub .impulso-unsupported-content > span { display: block; min-width: 0; }
+    .impulso-hub .impulso-structured-card strong,
+    .impulso-hub .impulso-structured-card small,
+    .impulso-hub .impulso-unsupported-content strong,
+    .impulso-hub .impulso-unsupported-content small { display: block; }
+    .impulso-hub .impulso-structured-card small,
+    .impulso-hub .impulso-unsupported-content small { font-size: 10px; margin-top: 3px; opacity: .7; }
+    .impulso-hub .impulso-structured-link { margin-left: auto; white-space: nowrap; }
+    .impulso-hub .impulso-message-sticker { max-height: 180px; max-width: 180px; object-fit: contain; }
+    .impulso-hub .impulso-note-label { color: var(--ih-warning, #d99b00); font-size: 9px; font-weight: 800; letter-spacing: .08em; margin-bottom: 5px; text-transform: uppercase; }
+    .impulso-hub .impulso-activity-content { align-items: center; display: flex; font-size: 10px; gap: 7px; opacity: .7; }
+    .impulso-hub .impulso-audio-message { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; }
+    .impulso-hub .impulso-media-kind { align-items: center; display: inline-flex; gap: 4px; }
+    .impulso-hub .impulso-media-kind svg { height: 14px; width: 14px; }
+    .impulso-hub .impulso-message-dialog-backdrop { align-items: center; background: rgba(0,0,0,.34); display: flex; inset: 0; justify-content: center; padding: 16px; position: fixed; z-index: 1090; }
+    .impulso-hub .impulso-message-dialog { background: var(--ih-surface); border: 1px solid var(--ih-border); border-radius: 12px; box-shadow: 0 18px 48px rgba(0,0,0,.24); max-width: 460px; padding: 16px; width: 100%; }
+    .impulso-hub .impulso-dialog-header,
+    .impulso-hub .impulso-dialog-actions { align-items: center; display: flex; gap: 8px; justify-content: space-between; }
+    .impulso-hub .impulso-dialog-header { border-bottom: 1px solid var(--ih-border); margin-bottom: 12px; padding-bottom: 9px; }
+    .impulso-hub .impulso-dialog-header h3 { font-size: 14px; margin: 0; }
+    .impulso-hub .impulso-dialog-header button { background: transparent; border: 0; color: inherit; cursor: pointer; font-size: 20px; }
+    .impulso-hub .impulso-message-dialog-form label { display: block; font-size: 10px; font-weight: 700; margin-bottom: 9px; }
+    .impulso-hub .impulso-message-dialog-form input,
+    .impulso-hub .impulso-message-dialog-form textarea { background: transparent; border: 1px solid var(--ih-border); border-radius: 7px; color: inherit; display: block; margin-top: 4px; padding: 8px; width: 100%; }
+    .impulso-hub .impulso-message-dialog-form textarea { min-height: 100px; resize: vertical; }
+    .impulso-hub .impulso-dialog-error { color: var(--ih-danger); font-size: 10px; min-height: 16px; }
+    .impulso-hub .impulso-dialog-actions { justify-content: flex-end; margin-top: 8px; }
+    .impulso-hub .impulso-dialog-actions button { border: 1px solid var(--ih-border); border-radius: 7px; cursor: pointer; padding: 7px 10px; }
 
     @media (max-width: 575.98px) {
         .impulso-hub .impulso-builder-steps { grid-template-columns: repeat(4,minmax(52px,1fr)); }
         .impulso-hub .impulso-builder-step { align-items: center; flex-direction: column; font-size: 8px; }
-        .impulso-hub .impulso-composer-popover { left: 8px; max-width: calc(100vw - 32px); width: 310px; }
+        .impulso-hub .impulso-composer-popover { left: 8px; max-width: calc(100% - 32px); width: 310px; }
         .impulso-hub .impulso-bulk-bar { align-items: stretch; flex-direction: column; }
         .impulso-hub .impulso-bulk-bar strong { margin: 0; }
     }
 
     /* Conversations fit the Rise viewport; scrolling remains inside each column. */
     #page-content.impulso-page-content--conversations {
-        --impulso-viewport-offset: 115px;
         box-sizing: border-box;
-        height: calc(100vh - var(--impulso-viewport-offset));
-        height: calc(100dvh - var(--impulso-viewport-offset));
+        height: var(--impulso-available-height, auto);
+        max-height: var(--impulso-available-height, none);
         min-height: 0 !important;
         overflow: hidden;
     }
@@ -2625,5 +2761,554 @@
     #page-content.impulso-page-content--conversations .impulso-chat-layout {
         height: 100%;
         min-height: 0;
+    }
+    .impulso-workflow-filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+    .impulso-workflow-filters .form-control { min-width: 0; height: 30px; font-size: 11px; }
+    .impulso-conversation-card { position: relative; display: flex; align-items: stretch; }
+    .impulso-conversation-select { flex: 1 1 auto; min-width: 0; border: 0; background: transparent; text-align: left; padding: 0; color: inherit; }
+    .impulso-conversation-menu-trigger { flex: 0 0 30px; align-self: flex-start; border: 0; background: transparent; color: var(--impulso-muted, #718096); padding: 10px 4px; }
+    .impulso-conversation-menu-trigger:hover, .impulso-conversation-menu-trigger:focus { color: var(--impulso-primary, #2563eb); }
+    .impulso-workflow-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .impulso-workflow-pill, .impulso-workflow-tag { border-radius: 999px; padding: 2px 6px; font-size: 10px; line-height: 1.2; background: #edf2f7; color: #4a5568; }
+    .impulso-workflow-pill.priority-high { background: #fff3cd; color: #856404; }
+    .impulso-workflow-pill.priority-urgent { background: #fde2e2; color: #a61b1b; }
+    .impulso-active-filter-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+    .impulso-filter-chip { display: inline-flex; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 8px; border-radius: 12px; background: #eef2f7; color: #425466; font-size: 11px; }
+    .impulso-custom-snooze { margin-top: 8px; padding: 10px; border: 1px solid #dce3eb; border-radius: 8px; background: #fff; box-shadow: 0 5px 16px rgba(20, 40, 60, .12); }
+    .impulso-custom-snooze label { display: block; font-size: 11px; font-weight: 600; margin-bottom: 4px; }
+    .impulso-custom-snooze-actions { display: flex; justify-content: flex-end; gap: 5px; margin-top: 6px; }
+    .impulso-workflow-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 8px 0; }
+    .impulso-workflow-controls label { font-size: 11px; color: #718096; }
+    .impulso-workflow-controls .form-control { margin-top: 3px; }
+    .impulso-previous-row { width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 0; border-bottom: 1px solid #edf2f7; background: transparent; padding: 7px 0; text-align: left; }
+    .impulso-previous-row span, .impulso-activity-row span, .impulso-activity-row time { display: block; font-size: 11px; color: #718096; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+    .impulso-activity-row { display: grid; gap: 2px; padding: 7px 0; border-bottom: 1px solid #edf2f7; }
+    .impulso-activity-row time { font-size: 10px; }
+    #impulso-conversation-context-menu { position: fixed; z-index: 1100; width: 190px; max-height: calc(100vh - 16px); overflow-y: auto; padding: 6px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; box-shadow: 0 12px 28px rgba(15, 23, 42, .18); }
+    #impulso-conversation-context-menu button { display: block; width: 100%; border: 0; background: transparent; text-align: left; padding: 6px 8px; border-radius: 5px; font-size: 12px; }
+    #impulso-conversation-context-menu button:hover, #impulso-conversation-context-menu button:focus { background: #edf2f7; }
+    .impulso-context-menu-title { font-size: 12px; font-weight: 600; padding: 5px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .impulso-context-menu-group { border-top: 1px solid #edf2f7; margin-top: 4px; padding-top: 4px; }
+    .impulso-context-menu-group > span { display: block; padding: 2px 8px; font-size: 10px; color: #718096; text-transform: uppercase; }
+    .impulso-bulk-select { display: flex; align-items: flex-start; padding: 12px 3px 0 5px; cursor: pointer; }
+    .impulso-bulk-bar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; padding: 7px 10px; border-bottom: 1px solid #dce3eb; background: #f7fafc; font-size: 11px; }
+    .impulso-bulk-bar button { border: 1px solid #dce3eb; border-radius: 5px; background: #fff; padding: 3px 6px; font-size: 10px; }
+    .impulso-bulk-bar [data-bulk-result] { color: #718096; }
+    .impulso-saved-views { padding: 7px 10px; border-bottom: 1px solid #edf2f7; }
+    .impulso-saved-views-heading { display: flex; justify-content: space-between; align-items: center; font-size: 11px; }
+    .impulso-saved-view-row { display: flex; align-items: center; gap: 2px; margin-top: 3px; }
+    .impulso-saved-view-row > button:first-child { display: flex; align-items: center; gap: 5px; flex: 1; border: 0; background: transparent; text-align: left; padding: 4px; font-size: 11px; }
+    .impulso-saved-view-row > button:hover { background: #f7fafc; }
+    .impulso-presence-warning { display: flex; gap: 6px; align-items: center; padding: 5px 12px; background: #fff8e1; color: #7a5b00; font-size: 11px; }
+    .impulso-note-mentions { margin-top: 5px; font-size: 10px; color: #2563eb; }
+    .impulso-note-mention { margin-right: 5px; }
+    @media (max-width: 1050px) { .impulso-workflow-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+    /* Phase 8 release polish: keep the dense inbox readable in every Rise theme. */
+    .impulso-hub {
+        --ih-surface-raised: var(--bs-body-bg, rgba(127, 127, 127, .08));
+        --ih-focus-ring: 0 0 0 3px rgba(109, 93, 252, .18);
+        --ih-radius-sm: 7px;
+        --ih-radius-md: 10px;
+        --ih-radius-lg: 13px;
+    }
+
+    .impulso-hub :where(button, a, input, select, textarea):focus-visible {
+        outline: 2px solid var(--ih-primary);
+        outline-offset: 2px;
+    }
+
+    .impulso-hub :where(button, input, select, textarea):disabled {
+        cursor: not-allowed;
+    }
+
+    .impulso-hub .impulso-conversation-item,
+    .impulso-hub .impulso-conversation-card {
+        min-height: 76px;
+    }
+
+    .impulso-hub .impulso-conversation-card {
+        align-items: stretch;
+        padding: 0;
+    }
+
+    .impulso-hub .impulso-conversation-select {
+        padding: 10px 4px 10px 12px;
+    }
+
+    .impulso-hub .impulso-conversation-card.unread .impulso-conversation-title strong {
+        font-weight: 800;
+    }
+
+    .impulso-hub .impulso-conversation-card.unread .impulso-conversation-preview {
+        color: inherit;
+        font-weight: 600;
+    }
+
+    .impulso-hub .impulso-conversation-menu-trigger {
+        align-items: center;
+        display: inline-flex;
+        justify-content: center;
+        min-height: 34px;
+        min-width: 34px;
+        opacity: .68;
+    }
+
+    .impulso-hub .impulso-conversation-menu-trigger:hover,
+    .impulso-hub .impulso-conversation-menu-trigger:focus-visible {
+        opacity: 1;
+    }
+
+    .impulso-hub .impulso-conversation-meta > span:not(.impulso-instance-mini):not(.impulso-unread) {
+        max-width: 110px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .impulso-hub .impulso-active-filter-row {
+        min-height: 22px;
+    }
+
+    .impulso-hub .impulso-filter-chip,
+    .impulso-hub .impulso-workflow-pill,
+    .impulso-hub .impulso-workflow-tag {
+        border: 1px solid transparent;
+        line-height: 1.35;
+    }
+
+    .impulso-hub .impulso-workflow-pill,
+    .impulso-hub .impulso-workflow-tag,
+    .impulso-hub .impulso-filter-chip,
+    .impulso-hub .impulso-custom-snooze,
+    .impulso-hub .impulso-saved-views,
+    .impulso-hub .impulso-bulk-bar,
+    .impulso-hub .impulso-bulk-form {
+        background: var(--ih-surface-soft);
+        border-color: var(--ih-border);
+        color: inherit;
+    }
+
+    .impulso-hub .impulso-custom-snooze {
+        box-shadow: 0 12px 30px rgba(15, 23, 42, .14);
+    }
+
+    .impulso-hub .impulso-custom-snooze input,
+    .impulso-hub .impulso-bulk-form select {
+        background: var(--ih-surface-raised);
+        color: inherit;
+    }
+
+    .impulso-hub .impulso-message p,
+    .impulso-hub .impulso-message-reply-quote,
+    .impulso-hub .impulso-structured-card,
+    .impulso-hub .impulso-unsupported-content,
+    .impulso-hub .impulso-message-caption,
+    .impulso-hub .impulso-template-card {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+
+    .impulso-hub .impulso-message-footer {
+        min-height: 14px;
+    }
+
+    .impulso-hub .impulso-message-reactions,
+    .impulso-hub .impulso-template-buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+
+    .impulso-hub .impulso-message-reaction {
+        flex: 0 0 auto;
+    }
+
+    .impulso-hub .impulso-composer-box {
+        min-width: 0;
+    }
+
+    .impulso-hub .impulso-composer-tools,
+    .impulso-hub .impulso-composer-box > .impulso-tool-button,
+    .impulso-hub .impulso-composer-box > .impulso-send-button {
+        flex: 0 0 auto;
+    }
+
+    .impulso-hub .impulso-composer textarea {
+        min-width: 0;
+    }
+
+    .impulso-hub .impulso-composer-popover,
+    .impulso-hub .impulso-context-menu,
+    .impulso-hub .impulso-reaction-picker,
+    .impulso-hub .impulso-suggestion-list,
+    .impulso-hub .impulso-bulk-form {
+        background: var(--ih-surface-raised);
+        color: inherit;
+    }
+
+    .impulso-hub .impulso-composer-popover {
+        border-radius: var(--ih-radius-lg);
+        max-width: min(360px, calc(100% - 24px));
+        padding: 12px;
+    }
+
+    .impulso-hub .impulso-template-picker-head {
+        align-items: center;
+        border-bottom: 1px solid var(--ih-border);
+        display: flex;
+        gap: 8px;
+        justify-content: space-between;
+        margin-bottom: 9px;
+        min-height: 30px;
+    }
+
+    .impulso-hub .impulso-template-picker-head strong {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .impulso-hub .impulso-template-picker-head .btn {
+        flex: 0 0 auto;
+    }
+
+    .impulso-hub .impulso-template-list {
+        display: grid;
+        gap: 5px;
+        margin-top: 9px;
+        max-height: 210px;
+        overflow: auto;
+    }
+
+    .impulso-hub .impulso-template-option {
+        background: transparent;
+        border: 1px solid var(--ih-border);
+        border-radius: var(--ih-radius-md);
+        color: inherit;
+        cursor: pointer;
+        display: block;
+        min-width: 0;
+        padding: 9px 10px;
+        text-align: left;
+        width: 100%;
+    }
+
+    .impulso-hub .impulso-template-option:hover,
+    .impulso-hub .impulso-template-option:focus-visible {
+        background: var(--ih-primary-soft);
+        border-color: var(--ih-primary);
+    }
+
+    .impulso-hub .impulso-template-option strong,
+    .impulso-hub .impulso-template-option small,
+    .impulso-hub .impulso-template-option span,
+    .impulso-hub .impulso-template-preview-header,
+    .impulso-hub .impulso-template-preview > p,
+    .impulso-hub .impulso-template-preview > small {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .impulso-hub .impulso-template-option strong {
+        white-space: nowrap;
+    }
+
+    .impulso-hub .impulso-template-option small,
+    .impulso-hub .impulso-template-option span,
+    .impulso-hub .impulso-template-sync-note,
+    .impulso-hub .impulso-empty-copy {
+        font-size: 10px;
+        line-height: 1.4;
+        opacity: .72;
+    }
+
+    .impulso-hub .impulso-template-option span {
+        margin-top: 4px;
+        white-space: nowrap;
+    }
+
+    .impulso-hub .impulso-template-preview {
+        background: var(--ih-surface-soft);
+        border: 1px solid var(--ih-border);
+        border-radius: var(--ih-radius-md);
+        margin-bottom: 10px;
+        padding: 9px;
+    }
+
+    .impulso-hub .impulso-template-preview-header {
+        font-weight: 700;
+        margin-bottom: 5px;
+        white-space: nowrap;
+    }
+
+    .impulso-hub .impulso-template-preview > p {
+        margin: 0 0 5px;
+        max-height: 84px;
+        overflow: auto;
+        white-space: pre-wrap;
+    }
+
+    .impulso-hub .impulso-template-preview-buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 7px;
+    }
+
+    .impulso-hub .impulso-template-preview-buttons span {
+        border: 1px solid var(--ih-border);
+        border-radius: 999px;
+        font-size: 10px;
+        padding: 3px 7px;
+    }
+
+    .impulso-hub .impulso-template-field {
+        display: block;
+        margin: 8px 0;
+    }
+
+    .impulso-hub .impulso-template-field > span {
+        display: block;
+        font-size: 10px;
+        font-weight: 700;
+        margin-bottom: 4px;
+    }
+
+    .impulso-hub .impulso-template-field input[type="text"],
+    .impulso-hub .impulso-template-field input[type="file"] {
+        max-width: 100%;
+        width: 100%;
+    }
+
+    .impulso-hub .impulso-template-field small {
+        display: block;
+        font-size: 10px;
+        margin-top: 4px;
+        overflow-wrap: anywhere;
+    }
+
+    .impulso-hub .impulso-template-field small button {
+        background: transparent;
+        border: 0;
+        color: var(--ih-danger);
+        cursor: pointer;
+        font-size: 10px;
+        padding: 0 2px;
+        text-decoration: underline;
+    }
+
+    .impulso-hub #impulso-mention-picker {
+        bottom: calc(100% - 42px);
+        left: 12px;
+        max-height: 220px;
+        padding: 5px;
+        width: min(280px, calc(100% - 24px));
+    }
+
+    .impulso-hub #impulso-mention-picker button {
+        background: transparent;
+        border: 0;
+        border-radius: var(--ih-radius-sm);
+        color: inherit;
+        display: block;
+        padding: 8px 9px;
+        text-align: left;
+        width: 100%;
+    }
+
+    .impulso-hub #impulso-mention-picker button:hover,
+    .impulso-hub #impulso-mention-picker button.is-highlighted,
+    .impulso-hub #impulso-mention-picker button[aria-selected="true"] {
+        background: var(--ih-primary-soft);
+        color: var(--ih-primary);
+    }
+
+    .impulso-hub .impulso-saved-views {
+        padding: 8px 10px;
+    }
+
+    .impulso-hub .impulso-saved-view-row > button:first-child {
+        min-width: 0;
+    }
+
+    .impulso-hub .impulso-saved-view-row > button:first-child span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .impulso-hub .impulso-saved-view-row > button:hover,
+    .impulso-hub .impulso-saved-view-row > button:focus-visible {
+        background: var(--ih-primary-soft);
+    }
+
+    .impulso-hub .impulso-bulk-bar {
+        border-radius: 0;
+        min-height: 42px;
+    }
+
+    .impulso-hub .impulso-bulk-bar button,
+    .impulso-hub .impulso-bulk-form button {
+        border-color: var(--ih-border);
+        color: inherit;
+    }
+
+    .impulso-hub .impulso-bulk-bar button:hover,
+    .impulso-hub .impulso-bulk-bar button:focus-visible,
+    .impulso-hub .impulso-bulk-form button:hover,
+    .impulso-hub .impulso-bulk-form button:focus-visible {
+        border-color: var(--ih-primary);
+        color: var(--ih-primary);
+    }
+
+    .impulso-hub .impulso-bulk-form {
+        border: 1px solid var(--ih-border);
+        border-radius: var(--ih-radius-md);
+        box-shadow: 0 14px 34px rgba(15, 23, 42, .16);
+        display: grid;
+        gap: 8px;
+        margin: 8px 10px;
+        padding: 10px;
+    }
+
+    .impulso-hub .impulso-bulk-form label {
+        display: grid;
+        font-size: 10px;
+        font-weight: 700;
+        gap: 4px;
+    }
+
+    .impulso-hub .impulso-bulk-form-actions {
+        display: flex;
+        gap: 6px;
+        justify-content: flex-end;
+    }
+
+    .impulso-hub .impulso-presence-warning {
+        background: rgba(229, 154, 34, .12);
+        border-bottom: 1px solid rgba(229, 154, 34, .24);
+        color: inherit;
+        min-height: 30px;
+    }
+
+    .impulso-hub .impulso-activity-row,
+    .impulso-hub .impulso-previous-row {
+        border-color: var(--ih-border);
+        padding: 8px 2px;
+    }
+
+    .impulso-hub .impulso-previous-row:hover,
+    .impulso-hub .impulso-previous-row:focus-visible {
+        background: var(--ih-primary-soft);
+        border-radius: var(--ih-radius-sm);
+        outline-offset: -2px;
+    }
+
+    .impulso-hub .impulso-context-menu button:hover,
+    .impulso-hub .impulso-context-menu button:focus-visible {
+        background: var(--ih-primary-soft);
+        color: var(--ih-primary);
+        outline-offset: -2px;
+    }
+
+    .impulso-hub #impulso-media-stage {
+        max-height: min(78vh, 760px);
+        min-height: min(55vh, 560px);
+        overflow: auto;
+        overscroll-behavior: contain;
+    }
+
+    .impulso-hub #impulso-media-stage img,
+    .impulso-hub #impulso-media-stage video {
+        height: auto;
+        max-height: min(72vh, 680px);
+        width: auto;
+    }
+
+    .impulso-hub #impulso-media-stage iframe {
+        max-height: min(72vh, 680px);
+    }
+
+    .impulso-open-conversation-list { display: none; }
+
+    @media (max-width: 991.98px) {
+        .impulso-hub .impulso-composer-box {
+            align-items: end;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 34px 34px;
+        }
+
+        .impulso-hub .impulso-composer-box textarea {
+            grid-column: 1;
+            grid-row: 1;
+            min-width: 0;
+            width: 100%;
+        }
+
+        .impulso-hub .impulso-composer-tools {
+            display: flex;
+            flex-wrap: wrap;
+            grid-column: 1 / -1;
+            grid-row: 2;
+            min-width: 0;
+            width: 100%;
+        }
+
+        .impulso-hub .impulso-composer-box > .impulso-tool-button,
+        .impulso-hub .impulso-composer-box > .impulso-send-button {
+            grid-row: 1;
+        }
+
+        .impulso-hub .impulso-composer-box > .impulso-tool-button { grid-column: 2; }
+        .impulso-hub .impulso-composer-box > .impulso-send-button { grid-column: 3; }
+        .impulso-hub .impulso-open-conversation-list { display: inline-flex; }
+    }
+
+    @media (max-width: 840px) {
+        .impulso-hub .impulso-chat-body { padding-left: 10px; padding-right: 10px; }
+        .impulso-hub .impulso-message { max-width: 90%; }
+    }
+
+    @media (max-width: 575.98px) {
+        .impulso-hub .impulso-chat-header {
+            align-items: flex-start;
+            flex-wrap: wrap;
+            padding: 8px 10px;
+        }
+
+        .impulso-hub .impulso-chat-header-actions {
+            margin-left: auto;
+        }
+
+        .impulso-hub .impulso-chat-body {
+            padding: 13px 10px;
+        }
+
+        .impulso-hub .impulso-message {
+            max-width: 94%;
+        }
+
+        .impulso-hub .impulso-composer {
+            padding: 8px 9px 10px;
+        }
+
+        .impulso-hub .impulso-composer-popover {
+            bottom: calc(100% - 34px);
+            left: 6px;
+        }
+
+        .impulso-hub #impulso-media-stage {
+            min-height: 38vh;
+            padding: 10px;
+        }
+
+        .impulso-hub #impulso-media-stage img,
+        .impulso-hub #impulso-media-stage video,
+        .impulso-hub #impulso-media-stage iframe {
+            max-height: 62vh;
+        }
     }
 </style>

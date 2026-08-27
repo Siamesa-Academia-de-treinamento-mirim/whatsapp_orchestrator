@@ -23,6 +23,8 @@ class Chat_messages_model extends Crud_model
         'mime_type',
         'status',
         'sent_at',
+        'delivered_at',
+        'read_at',
         'message_timestamp',
         'dedupe_key',
         'client_message_id',
@@ -83,6 +85,7 @@ class Chat_messages_model extends Crud_model
         $limit = min(200, max(1, $limit));
         $builder = $this->db->table($this->table)
             ->where('conversation_id', $conversationId)
+            ->where('message_type !=', 'reaction')
             ->where('deleted', 0);
 
         if ($beforeTimestamp !== null && $beforeTimestamp > 0) {
@@ -127,6 +130,7 @@ class Chat_messages_model extends Crud_model
         $rows = $this->db->table($this->table)
             ->where('conversation_id', $conversationId)
             ->where('id >', $afterId)
+            ->where('message_type !=', 'reaction')
             ->where('deleted', 0)
             ->orderBy('id', 'ASC')
             ->limit($limit)
@@ -301,6 +305,7 @@ class Chat_messages_model extends Crud_model
 
         return $this->db->table($this->table)
             ->where('conversation_id', $conversationId)
+            ->where('message_type !=', 'reaction')
             ->where('deleted', 0)
             ->countAllResults();
     }
@@ -316,6 +321,7 @@ class Chat_messages_model extends Crud_model
 
         $builder = $this->db->table($this->table)
             ->where('conversation_id', $conversationId)
+            ->where('message_type !=', 'reaction')
             ->where('deleted', 0);
 
         if ($beforeTimestamp !== null && $beforeTimestamp > 0) {

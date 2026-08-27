@@ -107,6 +107,7 @@ abstract class Api_controller extends Security_Controller
                 $payload[$key] = $value;
             }
         }
+        $payload['csrf'] = $this->csrfPayload();
 
         return $this->response
             ->setStatusCode($status_code)
@@ -123,6 +124,7 @@ abstract class Api_controller extends Security_Controller
         if ($details !== []) {
             $payload['details'] = $details;
         }
+        $payload['csrf'] = $this->csrfPayload();
 
         return $this->response
             ->setStatusCode($status_code)
@@ -158,6 +160,16 @@ abstract class Api_controller extends Security_Controller
     protected function actorId(): int
     {
         return (int) ($this->login_user->id ?? 0);
+    }
+
+    /** @return array{csrf_header:string,csrf_token_name:string,csrf_hash:string} */
+    private function csrfPayload(): array
+    {
+        return [
+            'csrf_header' => csrf_header(),
+            'csrf_token_name' => csrf_token(),
+            'csrf_hash' => csrf_hash(),
+        ];
     }
 
     private function abortRequest(string $message, int $status_code): void
