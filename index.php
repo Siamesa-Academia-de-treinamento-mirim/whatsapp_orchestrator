@@ -121,7 +121,7 @@ if (!function_exists('impulso_hub_left_menu_items')) {
         }
 
         $menu = [
-            'name' => 'Impulso Hub',
+            'name' => 'Whatsapp',
             'url' => get_uri('chatwoot_plugin'),
             'is_custom_menu_item' => true,
             'class' => 'message-square',

@@ -39,6 +39,7 @@ foreach (($conversations ?? []) as $conversation) {
 ?>
 <div class="impulso-conversations-page">
     <div class="impulso-chat-layout">
+        <div class="impulso-inbox-drawer-backdrop impulso-hidden" data-impulso-action="close-inbox-drawers" aria-hidden="true"></div>
         <aside class="impulso-channel-sidebar" id="impulso-channel-sidebar" aria-label="Canais de atendimento">
             <div class="impulso-channel-header">
                 <div>
@@ -172,7 +173,8 @@ foreach (($conversations ?? []) as $conversation) {
         <section class="impulso-chat-column impulso-chat-main">
             <header class="impulso-chat-header">
                 <div class="impulso-chat-header-main">
-                    <button class="impulso-icon-button btn btn-default impulso-open-conversation-list" type="button" data-impulso-action="open-conversation-list"><i data-feather="menu"></i></button>
+                    <button class="impulso-icon-button btn btn-default impulso-panel-toggle impulso-channel-panel-toggle" type="button" data-impulso-action="toggle-channel-sidebar" data-panel-toggle="channel" aria-controls="impulso-channel-sidebar" aria-expanded="true" aria-label="Recolher canais" title="Recolher canais"><i data-feather="sidebar"></i><span class="impulso-sr-only">Recolher canais</span></button>
+                    <button class="impulso-icon-button btn btn-default impulso-open-conversation-list impulso-panel-toggle" type="button" data-impulso-action="toggle-conversation-sidebar" data-panel-toggle="conversation" aria-controls="impulso-chat-sidebar" aria-expanded="true" aria-label="Recolher conversas" title="Recolher conversas"><i data-feather="menu"></i><span class="impulso-sr-only">Recolher conversas</span></button>
                     <div class="impulso-avatar" id="impulso-active-avatar"><?php echo esc($selected['avatar'] ?? '—'); ?></div>
                     <div class="impulso-chat-header-copy">
                         <h3 id="impulso-active-name"><?php echo esc($selected['name'] ?? 'Selecione uma conversa'); ?></h3>

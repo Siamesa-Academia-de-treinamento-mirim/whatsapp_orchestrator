@@ -163,6 +163,7 @@ class Chatwoot extends Security_Controller
                     'page' => get_uri('chatwoot_plugin'),
                     'instances' => get_uri('chatwoot_plugin/api/instances'),
                     'instancesRefresh' => get_uri('chatwoot_plugin/api/instances/refresh-status'),
+                    'instancesSyncEvolution' => get_uri('chatwoot_plugin/api/instances/sync-evolution'),
                     'conversations' => get_uri('chatwoot_plugin/api/conversations'),
                     'conversationAssignmentOptions' => get_uri('chatwoot_plugin/api/conversations/assignment-options'),
                     'contacts' => get_uri('chatwoot_plugin/api/contacts'),

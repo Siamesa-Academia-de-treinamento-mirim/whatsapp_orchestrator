@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Chatwoot_plugin\Controllers;
 
 use Chatwoot_plugin\Libraries\Chat_permissions;
+use Chatwoot_plugin\Libraries\Evolution_client;
 use Chatwoot_plugin\Models\Chat_instances_model;
+use Chatwoot_plugin\Models\Chat_settings_model;
 use Chatwoot_plugin\Services\Chat_service;
 use Chatwoot_plugin\Services\Audit_service;
 use CodeIgniter\HTTP\ResponseInterface;
@@ -72,8 +74,37 @@ class Instances extends Api_controller
 
         try {
             $payload = $validation['data'];
+
+            // Evolution instances are created in the provider first. The API
+            // key stays server-side; the browser only receives the local row.
+            $evolutionClient = null;
+            if (($payload['provider_type'] ?? 'evolution') === 'evolution') {
+                $evolutionClient = $this->evolutionClient($payload);
+                $providerPayload = [
+                    'instanceName' => (string) $payload['evolution_instance_name'],
+                    'integration' => 'WHATSAPP-BAILEYS',
+                    'qrcode' => true,
+                ];
+                if (!empty($payload['phone_number'])) {
+                    $providerPayload['number'] = (string) $payload['phone_number'];
+                }
+                $created = $evolutionClient->create_instance($providerPayload, $payload);
+                if (empty($created['success'])) {
+                    return $this->providerFailure($created, 'Nao foi possivel criar a instancia na Evolution API.');
+                }
+                $payload['connection_status'] = 'attention';
+                $payload['provider_status'] = 'connecting';
+            }
+
             $id = $this->instances->upsert_instance((string) $payload['internal_identifier'], $payload);
             $saved = $this->chat->get_instance($id);
+            $warnings = [];
+            if ($evolutionClient instanceof Evolution_client && is_array($saved)) {
+                $webhook = $evolutionClient->set_webhook($saved, $this->riseWebhookPayload());
+                if (empty($webhook['success'])) {
+                    $warnings[] = 'A instancia foi criada, mas o webhook do Rise precisa ser conferido.';
+                }
+            }
             (new Audit_service())->record(
                 $this->actorId(),
                 'instance.created',
@@ -84,7 +115,7 @@ class Instances extends Api_controller
                 $this->auditProjection($saved ?? [])
             );
 
-            return $this->success($saved, [], 201);
+            return $this->success($saved, $warnings ? ['warnings' => $warnings] : [], 201);
         } catch (Throwable $exception) {
             return $this->internalFailure($exception, 'Nao foi possivel salvar a instancia.', 422);
         }
@@ -171,6 +202,200 @@ class Instances extends Api_controller
         }
     }
 
+    /** Synchronizes the Rise catalogue with Evolution Manager's instance list. */
+    public function sync_evolution(): ResponseInterface
+    {
+        $this->requireManageInstancesPermission();
+
+        try {
+            $response = (new Evolution_client())->fetch_instances();
+            if (empty($response['success'])) {
+                return $this->providerFailure($response, 'Nao foi possivel consultar as instancias da Evolution API.');
+            }
+
+            $remoteInstances = $this->remoteInstanceList($response['data'] ?? null);
+            $synced = [];
+            $webhookWarnings = 0;
+            foreach ($remoteInstances as $remote) {
+                if (!is_array($remote)) {
+                    continue;
+                }
+
+                $remoteName = $this->remoteInstanceName($remote);
+                if ($remoteName === '') {
+                    continue;
+                }
+
+                $existing = $this->instances->get_by_evolution_name($remoteName);
+                if (!$existing) {
+                    $candidateIdentifier = $this->safeInternalIdentifier($remoteName);
+                    $candidate = $this->instances->get_by_identifier($candidateIdentifier);
+                    if ($candidate && (string) ($candidate['evolution_instance_name'] ?? '') !== $remoteName) {
+                        $candidateIdentifier = 'evolution_' . $candidateIdentifier;
+                    }
+                    $existing = $this->instances->get_by_identifier($candidateIdentifier);
+                }
+
+                $identifier = (string) ($existing['internal_identifier'] ?? $this->safeInternalIdentifier($remoteName));
+                $status = $this->remoteConnectionStatus($remote);
+                $payload = [
+                    'provider_type' => 'evolution',
+                    'name' => (string) ($existing['name'] ?? $remote['profileName'] ?? $remoteName),
+                    'internal_identifier' => $identifier,
+                    'evolution_instance_name' => $remoteName,
+                    'connection_status' => $status,
+                    'provider_status' => $this->remoteProviderStatus($remote, $status),
+                    'active' => 1,
+                ];
+                $phone = $this->remotePhone($remote);
+                if ($phone !== '') {
+                    $payload['phone_number'] = $phone;
+                }
+
+                $id = $this->instances->upsert_instance($identifier, $payload);
+                $local = $this->instances->get_by_id($id);
+                if (is_array($local)) {
+                    $webhook = $this->evolutionClient($local)->set_webhook($local, $this->riseWebhookPayload());
+                    if (empty($webhook['success'])) {
+                        $webhookWarnings++;
+                    }
+                }
+                $synced[] = ['id' => $id, 'name' => $remoteName, 'status' => $status];
+            }
+
+            return $this->success([
+                'count' => count($synced),
+                'instances' => $synced,
+            ], $webhookWarnings ? ['warnings' => $webhookWarnings . ' webhook(s) nao puderam ser atualizados.'] : []);
+        } catch (Throwable $exception) {
+            return $this->internalFailure($exception, 'Falha ao sincronizar as instancias da Evolution API.', 502);
+        }
+    }
+
+    /** Returns a QR code or pairing code without exposing provider credentials. */
+    public function connect(int $id): ResponseInterface
+    {
+        $this->requireManageInstancesPermission();
+        $instance = $this->getEvolutionInstance($id);
+        if ($instance instanceof ResponseInterface) {
+            return $instance;
+        }
+
+        try {
+            $number = trim((string) $this->request->getGet('number'));
+            if ($number !== '') {
+                $number = (string) preg_replace('/\D+/', '', $number);
+                if (strlen($number) > 32) {
+                    return $this->error('Numero de pareamento invalido.', 422);
+                }
+            }
+
+            $response = $this->evolutionClient($instance)->connect_instance($instance, $number !== '' ? $number : null);
+            if (empty($response['success'])) {
+                return $this->providerFailure($response, 'Nao foi possivel gerar o QR Code da Evolution.');
+            }
+
+            $data = is_array($response['data'] ?? null) ? $response['data'] : [];
+            $qr = $this->firstScalar($data, ['base64', 'qrCode', 'qr_code']);
+            $pairingCode = $this->firstScalar($data, ['pairingCode', 'pairing_code']);
+            $this->instances->update_connection_status($id, $qr !== '' || $pairingCode !== '' ? 'attention' : 'disconnected', gmdate('Y-m-d H:i:s'));
+
+            return $this->success([
+                'instance_id' => $id,
+                'instance_name' => (string) ($instance['evolution_instance_name'] ?? ''),
+                'base64' => $qr,
+                'pairing_code' => $pairingCode,
+                'provider' => $this->safeProviderData($data),
+            ]);
+        } catch (Throwable $exception) {
+            return $this->internalFailure($exception, 'Falha ao conectar a instancia Evolution.', 502);
+        }
+    }
+
+    public function restart(int $id): ResponseInterface
+    {
+        return $this->runEvolutionAction($id, 'restart');
+    }
+
+    public function logout(int $id): ResponseInterface
+    {
+        return $this->runEvolutionAction($id, 'logout');
+    }
+
+    /** Removes the instance from Evolution and then archives the local channel. */
+    public function delete_evolution(int $id): ResponseInterface
+    {
+        $this->requireManageInstancesPermission();
+        $instance = $this->getEvolutionInstance($id);
+        if ($instance instanceof ResponseInterface) {
+            return $instance;
+        }
+
+        try {
+            $response = $this->evolutionClient($instance)->delete_instance($instance);
+            if (empty($response['success'])) {
+                return $this->providerFailure($response, 'Nao foi possivel remover a instancia da Evolution API.');
+            }
+
+            $this->instances->soft_delete_instance($id);
+            (new Audit_service())->record(
+                $this->actorId(),
+                'instance.evolution_deleted',
+                'instance',
+                $id,
+                $id,
+                $this->auditProjection($instance),
+                ['deleted_from_evolution' => true]
+            );
+
+            return $this->success(['id' => $id, 'deleted' => true, 'provider' => 'evolution']);
+        } catch (Throwable $exception) {
+            return $this->internalFailure($exception, 'Nao foi possivel remover a instancia da Evolution.', 502);
+        }
+    }
+
+    /** @return ResponseInterface|array<string,mixed> */
+    private function getEvolutionInstance(int $id)
+    {
+        $instance = $this->instances->get_by_id($id);
+        if (!$instance) {
+            return $this->error('Instancia nao encontrada.', 404);
+        }
+        if (strtolower((string) ($instance['provider_type'] ?? 'evolution')) !== 'evolution') {
+            return $this->error('Esta acao esta disponivel apenas para instancias Evolution.', 422);
+        }
+
+        return $instance;
+    }
+
+    private function runEvolutionAction(int $id, string $action): ResponseInterface
+    {
+        $this->requireManageInstancesPermission();
+        $instance = $this->getEvolutionInstance($id);
+        if ($instance instanceof ResponseInterface) {
+            return $instance;
+        }
+
+        try {
+            $client = $this->evolutionClient($instance);
+            $response = $action === 'restart'
+                ? $client->restart_instance($instance)
+                : $client->logout_instance($instance);
+            if (empty($response['success'])) {
+                return $this->providerFailure($response, $action === 'restart'
+                    ? 'Nao foi possivel reiniciar a instancia Evolution.'
+                    : 'Nao foi possivel desconectar a instancia Evolution.');
+            }
+
+            $status = $action === 'restart' ? 'attention' : 'disconnected';
+            $this->instances->update_connection_status($id, $status, gmdate('Y-m-d H:i:s'));
+
+            return $this->success(['id' => $id, 'action' => $action, 'status' => $status]);
+        } catch (Throwable $exception) {
+            return $this->internalFailure($exception, 'Falha ao alterar a instancia Evolution.', 502);
+        }
+    }
+
     /** @return array{data:array<string,mixed>,errors:array<string,string>} */
     private function validatePayload(array $input, bool $creating, array $existing = []): array
     {
@@ -247,6 +472,186 @@ class Instances extends Api_controller
         $data['active'] = filter_var($input['active'] ?? true, FILTER_VALIDATE_BOOLEAN) ? 1 : 0;
         if ($creating) { $data['connection_status'] = 'disconnected'; $data['provider_status'] = 'disconnected'; }
         return ['data'=>$data,'errors'=>$errors];
+    }
+
+    /** @param array<string,mixed> $instance */
+    private function evolutionClient(array $instance): Evolution_client
+    {
+        $id = (int) ($instance['id'] ?? 0);
+        if ($id > 0) {
+            $apiKey = $this->instances->get_decrypted_api_key($id);
+            if (is_string($apiKey) && trim($apiKey) !== '') {
+                $instance['api_key'] = $apiKey;
+            }
+        }
+
+        return new Evolution_client(['instance' => $instance]);
+    }
+
+    /** @param array<string,mixed> $response */
+    private function providerFailure(array $response, string $message): ResponseInterface
+    {
+        $status = (int) ($response['status_code'] ?? $response['http_status'] ?? 0);
+        $details = ['code' => (string) ($response['error_code'] ?? 'evolution_api_error')];
+        if ($status >= 400 && $status <= 599) {
+            $details['provider_status'] = $status;
+        }
+
+        return $this->error($message, 502, $details);
+    }
+
+    /** @return array<int,array<string,mixed>> */
+    private function remoteInstanceList($data): array
+    {
+        if (!is_array($data)) {
+            return [];
+        }
+        foreach (['data', 'instances', 'results'] as $key) {
+            if (isset($data[$key]) && is_array($data[$key])) {
+                return $this->remoteInstanceList($data[$key]);
+            }
+        }
+
+        $list = [];
+        foreach ($data as $item) {
+            if (is_array($item)) {
+                $list[] = $item;
+            }
+        }
+
+        return $list;
+    }
+
+    /** @param array<string,mixed> $remote */
+    private function remoteInstanceName(array $remote): string
+    {
+        return $this->firstScalar($remote, ['instanceName', 'instance_name', 'name', 'instance']);
+    }
+
+    /** @param array<string,mixed> $remote */
+    private function remoteConnectionStatus(array $remote): string
+    {
+        $state = strtolower($this->firstScalar($remote, ['connectionStatus', 'connection_status', 'state', 'status']));
+        if (in_array($state, ['open', 'connected', 'online'], true)) {
+            return 'connected';
+        }
+        if (in_array($state, ['connecting', 'qr', 'qrcode', 'pairing'], true)) {
+            return 'attention';
+        }
+        if ($state === 'error') {
+            return 'error';
+        }
+
+        return 'disconnected';
+    }
+
+    /** @param array<string,mixed> $remote */
+    private function remoteProviderStatus(array $remote, string $fallback): string
+    {
+        $status = trim($this->firstScalar($remote, ['connectionStatus', 'connection_status', 'state', 'status']));
+
+        return substr($status !== '' ? $status : $fallback, 0, 32);
+    }
+
+    /** @param array<string,mixed> $remote */
+    private function remotePhone(array $remote): string
+    {
+        $phone = $this->firstScalar($remote, ['number', 'phone', 'phoneNumber', 'owner']);
+        $phone = (string) preg_replace('/\D+/', '', $phone);
+
+        return strlen($phone) <= 32 ? $phone : '';
+    }
+
+    private function safeInternalIdentifier(string $value): string
+    {
+        $value = preg_replace('/[^A-Za-z0-9._-]+/', '_', trim($value)) ?: 'evolution_instance';
+        $value = trim($value, '._-');
+        if ($value === '') {
+            $value = 'evolution_instance';
+        }
+
+        return substr($value, 0, 180);
+    }
+
+    /** @param array<string,mixed> $source @param array<int,string> $keys */
+    private function firstScalar(array $source, array $keys): string
+    {
+        foreach ($keys as $key) {
+            if (isset($source[$key]) && is_scalar($source[$key])) {
+                $value = trim((string) $source[$key]);
+                if ($value !== '') {
+                    return $value;
+                }
+            }
+        }
+
+        return '';
+    }
+
+    /** @param mixed $value */
+    private function safeProviderData($value)
+    {
+        if (is_array($value)) {
+            $safe = [];
+            foreach ($value as $key => $child) {
+                if (preg_match('/api[_-]?key|token|hash|authorization|password|secret/i', (string) $key)) {
+                    continue;
+                }
+                $safe[$key] = $this->safeProviderData($child);
+            }
+
+            return $safe;
+        }
+        if (is_object($value)) {
+            return $this->safeProviderData(get_object_vars($value));
+        }
+
+        return $value;
+    }
+
+    /** @return array<string,mixed> */
+    private function riseWebhookPayload(): array
+    {
+        $secret = trim((string) (new Chat_settings_model())->get_value(Chat_settings_model::WEBHOOK_SECRET, ''));
+        $payload = [
+            'enabled' => true,
+            'url' => function_exists('get_uri') ? get_uri('chatwoot_plugin/webhooks/evolution') : '',
+            'webhookByEvents' => false,
+            'webhookBase64' => false,
+            'events' => [
+                'APPLICATION_STARTUP',
+                'QRCODE_UPDATED',
+                'MESSAGES_SET',
+                'MESSAGES_UPSERT',
+                'MESSAGES_UPDATE',
+                'MESSAGES_DELETE',
+                'SEND_MESSAGE',
+                'CONTACTS_SET',
+                'CONTACTS_UPSERT',
+                'CONTACTS_UPDATE',
+                'PRESENCE_UPDATE',
+                'CHATS_SET',
+                'CHATS_UPSERT',
+                'CHATS_UPDATE',
+                'CHATS_DELETE',
+                'GROUPS_UPSERT',
+                'GROUP_UPDATE',
+                'GROUP_PARTICIPANTS_UPDATE',
+                'CONNECTION_UPDATE',
+                'REMOVE_INSTANCE',
+                'LOGOUT_INSTANCE',
+                'LABELS_EDIT',
+                'LABELS_ASSOCIATION',
+                'CALL',
+            ],
+        ];
+        if ($secret !== '') {
+            $payload['headers'] = [
+                'X-Chatwoot-Webhook-Secret' => $secret,
+            ];
+        }
+
+        return $payload;
     }
 
     private function isSafeBaseUrl(string $url): bool

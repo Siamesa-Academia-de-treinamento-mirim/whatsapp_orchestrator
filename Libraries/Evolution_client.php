@@ -423,14 +423,90 @@ class Evolution_client
     }
 
     /**
-     * @param array<string, mixed>|null $payload
-     * @param array<string, mixed>|object|string|null $instance
+     * Low-level DELETE for Evolution instance lifecycle operations.
+     *
      * @return array<string, mixed>
      */
-    public function request(string $method, string $path, ?array $payload = null, $instance = null): array
+    public function delete(string $path, $instance = null): array
+    {
+        return $this->request('DELETE', $path, null, $instance);
+    }
+
+    /** @return array<string, mixed> */
+    public function fetch_instances(): array
+    {
+        return $this->request('GET', '/instance/fetchInstances');
+    }
+
+    /** @param array<string, mixed> $payload */
+    public function create_instance(array $payload, $instance = null): array
+    {
+        return $this->request('POST', '/instance/create', $payload, $instance);
+    }
+
+    /** @return array<string, mixed> */
+    public function connect_instance($instance = null, ?string $number = null): array
+    {
+        $resolvedInstance = $this->normalizeInstanceOverride($instance);
+        $name = $this->instanceName($resolvedInstance);
+        if ($name === '') {
+            return $this->failure('configuration_error', 'Nome da instancia Evolution nao configurado.');
+        }
+
+        $query = [];
+        if ($number !== null && trim($number) !== '') {
+            $query['number'] = trim($number);
+        }
+
+        return $this->request(
+            'GET',
+            '/instance/connect/' . rawurlencode($name),
+            null,
+            $resolvedInstance,
+            $query
+        );
+    }
+
+    /** @return array<string, mixed> */
+    public function restart_instance($instance = null): array
+    {
+        return $this->instanceLifecycleRequest('POST', '/instance/restart/', $instance);
+    }
+
+    /** @return array<string, mixed> */
+    public function logout_instance($instance = null): array
+    {
+        return $this->instanceLifecycleRequest('DELETE', '/instance/logout/', $instance);
+    }
+
+    /** @return array<string, mixed> */
+    public function delete_instance($instance = null): array
+    {
+        return $this->instanceLifecycleRequest('DELETE', '/instance/delete/', $instance);
+    }
+
+    /** @return array<string, mixed> */
+    public function find_webhook($instance = null): array
+    {
+        return $this->instanceManagementRequest('GET', '/webhook/find/', $instance);
+    }
+
+    /** @param array<string, mixed> $payload */
+    public function set_webhook($instance, array $payload): array
+    {
+        return $this->instanceManagementRequest('POST', '/webhook/set/', $instance, ['webhook' => $payload]);
+    }
+
+    /**
+     * @param array<string, mixed>|null $payload
+     * @param array<string, mixed>|object|string|null $instance
+     * @param array<string, scalar|array<int, scalar>> $query
+     * @return array<string, mixed>
+     */
+    public function request(string $method, string $path, ?array $payload = null, $instance = null, array $query = []): array
     {
         $method = strtoupper(trim($method));
-        if (!in_array($method, ['GET', 'POST'], true)) {
+        if (!in_array($method, ['GET', 'POST', 'DELETE'], true)) {
             return $this->failure('unsupported_method', 'Metodo HTTP nao suportado.');
         }
 
@@ -442,6 +518,10 @@ class Evolution_client
         $url = $this->buildUrl($resolved['base_url'], $path);
         if ($url === null) {
             return $this->failure('configuration_error', 'URL da Evolution API invalida.');
+        }
+        $query = array_filter($query, static fn ($value): bool => $value !== null && $value !== '');
+        if ($query !== []) {
+            $url .= (str_contains($url, '?') ? '&' : '?') . http_build_query($query, '', '&', PHP_QUERY_RFC3986);
         }
 
         $headers = [
@@ -550,6 +630,33 @@ class Evolution_client
         $path = str_replace('{instance}', rawurlencode($instanceName), $template);
 
         return $this->request($method, $path, $payload, $resolvedInstance);
+    }
+
+    /** @return array<string, mixed> */
+    private function instanceLifecycleRequest(string $method, string $prefix, $instance): array
+    {
+        $resolvedInstance = $this->normalizeInstanceOverride($instance);
+        $name = $this->instanceName($resolvedInstance);
+        if ($name === '') {
+            return $this->failure('configuration_error', 'Nome da instancia Evolution nao configurado.');
+        }
+
+        return $this->request($method, $prefix . rawurlencode($name), null, $resolvedInstance);
+    }
+
+    /**
+     * @param array<string, mixed>|null $payload
+     * @return array<string, mixed>
+     */
+    private function instanceManagementRequest(string $method, string $prefix, $instance, ?array $payload = null): array
+    {
+        $resolvedInstance = $this->normalizeInstanceOverride($instance);
+        $name = $this->instanceName($resolvedInstance);
+        if ($name === '') {
+            return $this->failure('configuration_error', 'Nome da instancia Evolution nao configurado.');
+        }
+
+        return $this->request($method, $prefix . rawurlencode($name), $payload, $resolvedInstance);
     }
 
     /**

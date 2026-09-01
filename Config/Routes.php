@@ -22,10 +22,15 @@ $routes->group('chatwoot_plugin', $route_options, static function ($routes): voi
     $routes->get('api/instances', 'Instances::index');
     $routes->post('api/instances', 'Instances::create');
     $routes->post('api/instances/refresh-status', 'Instances::refresh_all');
+    $routes->post('api/instances/sync-evolution', 'Instances::sync_evolution');
     $routes->get('api/instances/(:num)', 'Instances::show/$1');
     $routes->post('api/instances/(:num)', 'Instances::update/$1');
     $routes->delete('api/instances/(:num)', 'Instances::delete/$1');
     $routes->post('api/instances/(:num)/status', 'Instances::status/$1');
+    $routes->get('api/instances/(:num)/evolution/connect', 'Instances::connect/$1');
+    $routes->post('api/instances/(:num)/evolution/restart', 'Instances::restart/$1');
+    $routes->post('api/instances/(:num)/evolution/logout', 'Instances::logout/$1');
+    $routes->delete('api/instances/(:num)/evolution', 'Instances::delete_evolution/$1');
 
     $routes->get('api/conversations', 'Conversations::index');
     $routes->get('api/conversations/assignment-options', 'Conversations::assignment_options');

@@ -24,6 +24,7 @@ foreach ($webhook_logs as $log) {
         </div>
         <div class="impulso-section-actions">
             <?php if (!empty($can_manage_instances)) { ?>
+                <button class="btn btn-default" type="button" data-impulso-action="sync-evolution"><i data-feather="download-cloud"></i> Sincronizar Evolution</button>
                 <button class="btn btn-default" type="button" data-impulso-action="refresh-instances"><i data-feather="refresh-cw"></i> Verificar todas</button>
                 <button class="btn btn-primary" type="button" data-impulso-action="new-instance"><i data-feather="plus"></i> Nova instância</button>
             <?php } ?>
@@ -57,6 +58,7 @@ foreach ($webhook_logs as $log) {
                     <div class="impulso-meta-box"><span>Identificador</span><strong><?php echo esc($providerType === 'meta_cloud' ? ($instance['meta_phone_number_id'] ?? '') : ($instance['evolution_instance_name'] ?? '')); ?></strong></div>
                     <div class="impulso-meta-box"><span>Conversas</span><strong><?php echo (int) ($instance['conversation_count'] ?? 0); ?></strong></div>
                     <div class="impulso-meta-box"><span>Não lidas</span><strong><?php echo (int) ($instance['unread_count'] ?? 0); ?></strong></div>
+                    <?php if ($providerType === 'evolution') { ?><div class="impulso-meta-box"><span>Estado Evolution</span><strong><?php echo esc($instance['provider_status'] ?? $status); ?></strong></div><?php } ?>
                     <div class="impulso-meta-box"><span>Status operacional</span><strong><?php echo !empty($instance['active']) ? 'Ativa' : 'Inativa'; ?></strong></div>
                 </div>
                 <div class="impulso-health-row">
@@ -67,6 +69,12 @@ foreach ($webhook_logs as $log) {
                 <div class="impulso-card-actions">
                     <?php if (!empty($can_manage_instances)) { ?>
                         <button class="btn btn-default btn-sm" type="button" data-impulso-action="test-instance" data-instance-id="<?php echo (int) ($instance['id'] ?? 0); ?>"><i data-feather="activity"></i> Atualizar status</button>
+                        <?php if ($providerType === 'evolution') { ?>
+                            <button class="btn btn-primary btn-sm" type="button" data-impulso-action="connect-evolution" data-instance-id="<?php echo (int) ($instance['id'] ?? 0); ?>"><i data-feather="maximize"></i> QR / parear</button>
+                            <button class="btn btn-default btn-sm" type="button" data-impulso-action="restart-evolution" data-instance-id="<?php echo (int) ($instance['id'] ?? 0); ?>"><i data-feather="rotate-cw"></i> Reiniciar</button>
+                            <button class="btn btn-default btn-sm" type="button" data-impulso-action="logout-evolution" data-instance-id="<?php echo (int) ($instance['id'] ?? 0); ?>"><i data-feather="log-out"></i> Desconectar</button>
+                            <button class="btn btn-danger btn-sm" type="button" data-impulso-action="delete-evolution" data-instance-id="<?php echo (int) ($instance['id'] ?? 0); ?>"><i data-feather="trash-2"></i> Remover da Evolution</button>
+                        <?php } ?>
                         <button class="btn btn-default btn-sm" type="button" data-impulso-action="edit-instance" data-instance-id="<?php echo (int) ($instance['id'] ?? 0); ?>"><i data-feather="settings"></i> Editar</button>
                     <?php } ?>
                 </div>

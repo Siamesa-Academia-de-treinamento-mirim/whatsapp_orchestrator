@@ -67,6 +67,24 @@
     </div>
 </div>
 
+<div class="modal fade" id="impulso-evolution-connect-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="impulso-modal-title"><div class="impulso-modal-title-icon"><i data-feather="maximize"></i></div><div><h4 id="impulso-evolution-connect-title">Conectar Evolution</h4><p>Leia o QR Code no WhatsApp para parear este canal.</p></div></div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+            </div>
+            <div class="modal-body text-center">
+                <div id="impulso-evolution-qr-empty" class="impulso-empty compact"><div class="impulso-empty-icon"><i data-feather="loader"></i></div><p>Gerando dados de conexão...</p></div>
+                <img id="impulso-evolution-qr" class="impulso-evolution-qr impulso-hidden" alt="QR Code para conectar o WhatsApp">
+                <div id="impulso-evolution-pairing-wrap" class="impulso-evolution-pairing impulso-hidden"><span>Código de pareamento</span><strong id="impulso-evolution-pairing-code"></strong></div>
+                <p id="impulso-evolution-connect-message" class="impulso-text-muted impulso-mt-12">Mantenha esta janela aberta até a conexão ser concluída.</p>
+            </div>
+            <div class="modal-footer"><button type="button" class="btn btn-default" data-bs-dismiss="modal">Fechar</button></div>
+        </div>
+    </div>
+</div>
+
 
 <div class="modal fade" id="impulso-bot-modal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered modal-xl"><div class="modal-content">

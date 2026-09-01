@@ -120,6 +120,124 @@
         content.style.setProperty('--impulso-available-height', available + 'px');
     }
 
+    var inboxPanelState = {
+        channelCollapsed: false,
+        conversationCollapsed: false
+    };
+
+    function inboxLayout() {
+        return app.querySelector('.impulso-chat-layout');
+    }
+
+    function inboxWidth() {
+        var workspace = app.querySelector('.impulso-workspace');
+        var layout = inboxLayout();
+        var element = workspace || layout;
+        var width = element ? Number(element.getBoundingClientRect().width || 0) : 0;
+        return width > 0 ? width : Number(window.innerWidth || 0);
+    }
+
+    function isCompactInbox() {
+        return inboxWidth() <= 991.98;
+    }
+
+    function readInboxPanelPreference(key) {
+        try { return window.localStorage.getItem(key) === '1'; } catch (error) { return false; }
+    }
+
+    function persistInboxPanelPreferences() {
+        try {
+            window.localStorage.setItem('impulso_hub_channel_collapsed', inboxPanelState.channelCollapsed ? '1' : '0');
+            window.localStorage.setItem('impulso_hub_conversation_collapsed', inboxPanelState.conversationCollapsed ? '1' : '0');
+        } catch (error) { /* Private browsing or disabled storage. */ }
+    }
+
+    function updateInboxPanelButtons(compact) {
+        var labels = {
+            channel: { open: 'Recolher canais', closed: 'Expandir canais' },
+            conversation: { open: 'Recolher conversas', closed: 'Expandir conversas' }
+        };
+        app.querySelectorAll('[data-panel-toggle]').forEach(function (button) {
+            var panel = button.getAttribute('data-panel-toggle');
+            var element = panel === 'channel'
+                ? document.getElementById('impulso-channel-sidebar')
+                : document.getElementById('impulso-chat-sidebar');
+            var open = compact
+                ? !!(element && element.classList.contains('open'))
+                : (panel === 'channel' ? !inboxPanelState.channelCollapsed : !inboxPanelState.conversationCollapsed);
+            var label = labels[panel] ? (open ? labels[panel].open : labels[panel].closed) : '';
+            button.setAttribute('aria-expanded', open ? 'true' : 'false');
+            button.setAttribute('aria-label', label);
+            button.setAttribute('title', label);
+            var screenReaderText = button.querySelector('.impulso-sr-only');
+            if (screenReaderText) screenReaderText.textContent = label;
+        });
+    }
+
+    function syncInboxPanels() {
+        var layout = inboxLayout();
+        if (!layout) return;
+        var compact = isCompactInbox();
+        var channel = document.getElementById('impulso-channel-sidebar');
+        var conversation = document.getElementById('impulso-chat-sidebar');
+        var backdrop = document.querySelector('.impulso-inbox-drawer-backdrop');
+
+        layout.classList.toggle('impulso-inbox-compact', compact);
+        layout.classList.toggle('impulso-channel-sidebar-collapsed', !compact && inboxPanelState.channelCollapsed);
+        layout.classList.toggle('impulso-conversation-sidebar-collapsed', !compact && inboxPanelState.conversationCollapsed);
+
+        if (!compact) {
+            if (channel) channel.classList.remove('open');
+            if (conversation) conversation.classList.remove('open');
+        }
+
+        var drawerOpen = compact && !!(
+            (channel && channel.classList.contains('open'))
+            || (conversation && conversation.classList.contains('open'))
+        );
+        if (backdrop) {
+            backdrop.classList.toggle('impulso-hidden', !drawerOpen);
+            backdrop.setAttribute('aria-hidden', drawerOpen ? 'false' : 'true');
+        }
+        if (channel) channel.setAttribute('aria-hidden', compact ? (channel.classList.contains('open') ? 'false' : 'true') : (inboxPanelState.channelCollapsed ? 'true' : 'false'));
+        if (conversation) conversation.setAttribute('aria-hidden', compact ? (conversation.classList.contains('open') ? 'false' : 'true') : (inboxPanelState.conversationCollapsed ? 'true' : 'false'));
+        updateInboxPanelButtons(compact);
+    }
+
+    function closeInboxDrawers() {
+        var channel = document.getElementById('impulso-channel-sidebar');
+        var conversation = document.getElementById('impulso-chat-sidebar');
+        if (channel) channel.classList.remove('open');
+        if (conversation) conversation.classList.remove('open');
+        syncInboxPanels();
+    }
+
+    function toggleInboxPanel(panel) {
+        var layout = inboxLayout();
+        if (!layout) return;
+        var compact = isCompactInbox();
+        var target = panel === 'channel'
+            ? document.getElementById('impulso-channel-sidebar')
+            : document.getElementById('impulso-chat-sidebar');
+        if (!target) return;
+
+        if (compact) {
+            var other = panel === 'channel'
+                ? document.getElementById('impulso-chat-sidebar')
+                : document.getElementById('impulso-channel-sidebar');
+            var opening = !target.classList.contains('open');
+            if (other) other.classList.remove('open');
+            target.classList.toggle('open', opening);
+            syncInboxPanels();
+            return;
+        }
+
+        if (panel === 'channel') inboxPanelState.channelCollapsed = !inboxPanelState.channelCollapsed;
+        else inboxPanelState.conversationCollapsed = !inboxPanelState.conversationCollapsed;
+        persistInboxPanelPreferences();
+        syncInboxPanels();
+    }
+
     var fallbackPollingTimers = {};
     function schedulePolling(name, delay, callback) {
         name = String(name);
@@ -1562,7 +1680,10 @@
         });
         markConversationRead(conversation);
         var sidebar = document.getElementById('impulso-chat-sidebar');
-        if (sidebar && window.innerWidth <= 840) sidebar.classList.remove('open');
+        if (sidebar && isCompactInbox()) {
+            sidebar.classList.remove('open');
+            syncInboxPanels();
+        }
         return history.then(function () { return state.activeConversationRecord; });
     }
 
@@ -2281,9 +2402,12 @@
             body.meta_app_secret = fieldValue('impulso-instance-meta-app-secret');
         }
         button.disabled = true;
-        api(id ? endpointWithId('instances', id) : endpoint('instances'), { method: 'POST', body: body }).then(function () {
+        api(id ? endpointWithId('instances', id) : endpoint('instances'), { method: 'POST', body: body }).then(function (payload) {
             closeModal(button);
             showToast('Canal salvo', 'A configuração foi armazenada com segurança.', 'check-circle');
+            if (payload && Array.isArray(payload.warnings) && payload.warnings.length) {
+                showToast('Webhook pendente', payload.warnings[0], 'alert-triangle');
+            }
             return refreshInstancesSurface();
         }).catch(function (error) {
             showToast('Falha ao salvar', error.message, 'alert-triangle');
@@ -2424,6 +2548,92 @@
         }).finally(function () { if (button) button.disabled = false; });
     }
 
+    function evolutionInstance(id) {
+        return state.instances.find(function (item) { return Number(item.id) === Number(id); }) || null;
+    }
+
+    function showEvolutionConnectModal(instance, data) {
+        var modal = document.getElementById('impulso-evolution-connect-modal');
+        var empty = document.getElementById('impulso-evolution-qr-empty');
+        var image = document.getElementById('impulso-evolution-qr');
+        var pairingWrap = document.getElementById('impulso-evolution-pairing-wrap');
+        var pairingCode = document.getElementById('impulso-evolution-pairing-code');
+        var message = document.getElementById('impulso-evolution-connect-message');
+        var qr = data && typeof data.base64 === 'string' ? data.base64.trim() : '';
+        var pairing = data && typeof data.pairing_code === 'string' ? data.pairing_code.trim() : '';
+        var qrSource = '';
+        if (/^data:image\/(?:png|jpe?g|webp);base64,/i.test(qr)) {
+            qrSource = qr;
+        } else if (qr && qr.length < 1000000 && /^[A-Za-z0-9+/=\s]+$/.test(qr)) {
+            qrSource = 'data:image/png;base64,' + qr.replace(/\s/g, '');
+        }
+        setText('impulso-evolution-connect-title', 'Conectar ' + (instance ? instance.name : 'Evolution'));
+        if (image) {
+            image.classList.toggle('impulso-hidden', !qrSource);
+            if (qrSource) image.src = qrSource;
+            else image.removeAttribute('src');
+        }
+        if (pairingWrap) pairingWrap.classList.toggle('impulso-hidden', !pairing);
+        if (pairingCode) pairingCode.textContent = pairing;
+        if (empty) empty.classList.toggle('impulso-hidden', !!qrSource || !!pairing);
+        if (message) message.textContent = qrSource || pairing
+            ? 'Leia o QR Code no WhatsApp ou use o código de pareamento. Esta tela será atualizada quando o canal conectar.'
+            : 'A Evolution não retornou um QR Code neste momento. Tente novamente em alguns segundos.';
+        if (modal) {
+            if (window.bootstrap && window.bootstrap.Modal) window.bootstrap.Modal.getOrCreateInstance(modal).show();
+            else if (window.jQuery && typeof window.jQuery(modal).modal === 'function') window.jQuery(modal).modal('show');
+        }
+        replaceIcons();
+    }
+
+    function connectEvolutionInstance(id, button) {
+        var instance = evolutionInstance(id);
+        if (!id) return;
+        if (button) button.disabled = true;
+        var number = instance && (instance.phone || instance.phone_number) ? String(instance.phone || instance.phone_number) : '';
+        var url = endpointWithId('instances', id, '/evolution/connect');
+        if (number) url += '?number=' + encodeURIComponent(number);
+        api(url, { timingLabel: 'evolution_connect' }).then(function (payload) {
+            showEvolutionConnectModal(instance, payload.data || {});
+            showToast('Dados de conexão gerados', 'Leia o QR Code para parear o WhatsApp.', 'maximize');
+        }).catch(function (error) {
+            showToast('Falha ao conectar', error.message, 'alert-triangle');
+        }).finally(function () { if (button) button.disabled = false; });
+    }
+
+    function evolutionAction(id, action, button) {
+        if (!id) return;
+        var labels = {
+            restart: ['Instância reiniciada', 'A Evolution está iniciando a conexão novamente.'],
+            logout: ['Instância desconectada', 'O WhatsApp foi desconectado da Evolution.'],
+            delete: ['Instância removida', 'O canal foi removido da Evolution e arquivado no Rise.']
+        };
+        if (action === 'delete' && !window.confirm('Remover esta instância da Evolution? O pareamento e os dados da sessão serão perdidos.')) return;
+        if (button) button.disabled = true;
+        var suffix = action === 'delete' ? '/evolution' : '/evolution/' + action;
+        api(endpointWithId('instances', id, suffix), { method: action === 'delete' ? 'DELETE' : 'POST', body: {} }).then(function () {
+            showToast(labels[action][0], labels[action][1], action === 'delete' ? 'trash-2' : 'check-circle');
+            return refreshInstancesSurface(true);
+        }).catch(function (error) {
+            showToast('Falha na Evolution', error.message, 'alert-triangle');
+        }).finally(function () { if (button) button.disabled = false; });
+    }
+
+    function syncEvolutionInstances(button) {
+        if (!endpoint('instancesSyncEvolution')) return;
+        if (button) button.disabled = true;
+        api(endpoint('instancesSyncEvolution'), { method: 'POST', body: {}, timingLabel: 'evolution_instance_sync' }).then(function (payload) {
+            var data = payload.data || {};
+            showToast('Evolution sincronizada', (Number(data.count) || 0) + ' instância(s) importada(s) ou atualizada(s).', 'download-cloud');
+            if (payload && Array.isArray(payload.warnings) && payload.warnings.length) {
+                showToast('Webhook pendente', payload.warnings[0], 'alert-triangle');
+            }
+            return refreshInstancesSurface(true);
+        }).catch(function (error) {
+            showToast('Falha ao sincronizar', error.message, 'alert-triangle');
+        }).finally(function () { if (button) button.disabled = false; });
+    }
+
     function applyInitialSettings() {
         var values = {
             'impulso-setting-module-name': initialSettings.module_name || 'Impulso Hub WhatsApp',
@@ -2559,6 +2769,7 @@
             });
         });
         syncAvailableHeight();
+        window.addEventListener('resize', syncInboxPanels, { passive: true });
         window.addEventListener('resize', syncAvailableHeight, { passive: true });
         if (window.visualViewport) window.visualViewport.addEventListener('resize', syncAvailableHeight, { passive: true });
         if (window.requestAnimationFrame) window.requestAnimationFrame(syncAvailableHeight);
@@ -2595,14 +2806,17 @@
         if (action === 'edit-instance') { openInstanceModal(trigger.getAttribute('data-instance-id')); return; }
         if (action === 'test-instance') { testInstance(trigger.getAttribute('data-instance-id'), trigger); return; }
         if (action === 'refresh-instances') { refreshAllInstances(trigger); return; }
+        if (action === 'sync-evolution') { syncEvolutionInstances(trigger); return; }
+        if (action === 'connect-evolution') { connectEvolutionInstance(trigger.getAttribute('data-instance-id'), trigger); return; }
+        if (action === 'restart-evolution') { evolutionAction(trigger.getAttribute('data-instance-id'), 'restart', trigger); return; }
+        if (action === 'logout-evolution') { evolutionAction(trigger.getAttribute('data-instance-id'), 'logout', trigger); return; }
+        if (action === 'delete-evolution') { evolutionAction(trigger.getAttribute('data-instance-id'), 'delete', trigger); return; }
         if (action === 'save-settings') { saveSettings(trigger); return; }
         if (action === 'test-evolution') { testEvolutionSettings(trigger); return; }
         if (action === 'test-all-connections') { refreshAllInstances(trigger); return; }
-        if (action === 'open-conversation-list') {
-            var sidebar = document.getElementById('impulso-chat-sidebar');
-            if (sidebar) sidebar.classList.add('open');
-            return;
-        }
+        if (action === 'toggle-channel-sidebar') { toggleInboxPanel('channel'); return; }
+        if (action === 'toggle-conversation-sidebar' || action === 'open-conversation-list') { toggleInboxPanel('conversation'); return; }
+        if (action === 'close-inbox-drawers') { closeInboxDrawers(); return; }
         if (action === 'open-contact') {
             var contact = document.getElementById('impulso-contact-sidebar');
             if (contact) contact.classList.toggle('open');
@@ -2624,10 +2838,20 @@
     });
 
     document.addEventListener('click', function (event) {
+        if (isCompactInbox()
+            && !event.target.closest('#impulso-channel-sidebar')
+            && !event.target.closest('#impulso-chat-sidebar')
+            && !event.target.closest('[data-panel-toggle]')) {
+            closeInboxDrawers();
+        }
         var contact = document.getElementById('impulso-contact-sidebar');
         if (contact && contact.classList.contains('open') && !event.target.closest('#impulso-contact-sidebar') && !event.target.closest('[data-impulso-action="open-contact"]')) {
             contact.classList.remove('open');
         }
+    });
+
+    document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape' && isCompactInbox()) closeInboxDrawers();
     });
 
     window.ImpulsoHubBridge = {
@@ -2684,6 +2908,9 @@
     applyInitialSettings();
     bindConversationControls();
     bindStaticControls();
+    inboxPanelState.channelCollapsed = readInboxPanelPreference('impulso_hub_channel_collapsed');
+    inboxPanelState.conversationCollapsed = readInboxPanelPreference('impulso_hub_conversation_collapsed');
+    syncInboxPanels();
     replaceIcons();
 
     if (app.getAttribute('data-active-tab') === 'conversations') {
